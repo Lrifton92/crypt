@@ -17,7 +17,6 @@ homepage = "https://github.com/Lrifton92/crypt"
 
 [dependencies]
 tari_template_lib = "0.34.0"
-tari_template_abi = "0.20.1"
 minicbor = { version = "2.3", default-features = false, features = ["derive", "alloc"] }
 
 [lib]

@@ -86,8 +86,16 @@ pub fn commitment_of(block: &[u8]) -> Hash64 {
 /// Ristretto intrinsic panics on non-canonical input, and the identity as a key or nonce would make
 /// the shared secret public.
 fn assert_valid_point(point: &RistrettoPublicKeyBytes, what: &str) {
-    assert!(intrinsics::ristretto_is_canonical(point), "{} is not a canonical Ristretto point", what);
-    assert!(!intrinsics::ristretto_is_identity(point), "{} must not be the identity point", what);
+    assert!(
+        intrinsics::ristretto_is_canonical(point),
+        "{} is not a canonical Ristretto point",
+        what
+    );
+    assert!(
+        !intrinsics::ristretto_is_identity(point),
+        "{} must not be the identity point",
+        what
+    );
 }
 
 /// Fiat-Shamir challenge over the domain, the sale's context, an action message and the points.
@@ -128,7 +136,14 @@ fn assert_canonical_scalars(c: &Scalar32Bytes, z: &Scalar32Bytes) {
 }
 
 /// Schnorr proof by `key` over `message`, bound to this sale.
-fn assert_authorized(context: &[u8], key: &RistrettoPublicKeyBytes, message: &[u8], c: &Scalar32Bytes, z: &Scalar32Bytes, who: &str) {
+fn assert_authorized(
+    context: &[u8],
+    key: &RistrettoPublicKeyBytes,
+    message: &[u8],
+    c: &Scalar32Bytes,
+    z: &Scalar32Bytes,
+    who: &str,
+) {
     assert_canonical_scalars(c, z);
     let a = implied_nonce(None, key, c, z);
     assert!(
@@ -331,7 +346,7 @@ mod crypt {
         ) {
             assert!(self.stage == Stage::Listed, "not for sale");
             assert_valid_point(&base_key, "buyer key");
-            let context = self.context();
+            let context = Self::context();
             let key = sale_key(&context, &base_key);
             assert_valid_point(&key, "buyer sale key");
             let message = [b"buy".as_slice(), buyer_payout.as_bytes()].concat();
@@ -354,7 +369,13 @@ mod crypt {
 
         /// Delivers the sealed secret, signed by the seller key over `"deliver" || R || C`. Allowed up
         /// to and including the delivery deadline.
-        pub fn deliver(&mut self, ephemeral: RistrettoPublicKeyBytes, ciphertext: Bytes, c: Scalar32Bytes, z: Scalar32Bytes) {
+        pub fn deliver(
+            &mut self,
+            ephemeral: RistrettoPublicKeyBytes,
+            ciphertext: Bytes,
+            c: Scalar32Bytes,
+            z: Scalar32Bytes,
+        ) {
             assert!(self.stage == Stage::Paid, "nothing to deliver");
             let now = Consensus::current_epoch();
             assert!(now <= self.delivery_deadline.unwrap(), "delivery deadline passed");
@@ -365,7 +386,7 @@ mod crypt {
                 PLAINTEXT_LEN
             );
             let message = [b"deliver".as_slice(), ephemeral.as_bytes(), &ciphertext].concat();
-            assert_authorized(&self.context(), &self.seller_key, &message, &c, &z, "seller");
+            assert_authorized(&Self::context(), &self.seller_key, &message, &c, &z, "seller");
 
             self.ephemeral = Some(ephemeral);
             self.ciphertext = Some(ciphertext);
@@ -377,7 +398,7 @@ mod crypt {
         /// The buyer is satisfied: the seller gets the price, each side its bond back.
         pub fn accept(&mut self, c: Scalar32Bytes, z: Scalar32Bytes) {
             assert!(self.stage == Stage::Delivered, "nothing to accept");
-            assert_authorized(&self.context(), &self.buyer_key.unwrap(), MSG_ACCEPT, &c, &z, "buyer");
+            assert_authorized(&Self::context(), &self.buyer_key.unwrap(), MSG_ACCEPT, &c, &z, "buyer");
             self.settle(Outcome::Accepted);
         }
 
@@ -392,7 +413,7 @@ mod crypt {
             );
 
             assert_valid_point(&shared, "shared point");
-            let context = self.context();
+            let context = Self::context();
             let key = self.buyer_key.unwrap();
             let ephemeral = self.ephemeral.unwrap();
             assert!(
@@ -444,7 +465,7 @@ mod crypt {
         /// Withdraws the listing before anyone pays. Signed by the seller key.
         pub fn cancel(&mut self, c: Scalar32Bytes, z: Scalar32Bytes) {
             assert!(self.stage == Stage::Listed, "already sold");
-            assert_authorized(&self.context(), &self.seller_key, MSG_CANCEL, &c, &z, "seller");
+            assert_authorized(&Self::context(), &self.seller_key, MSG_CANCEL, &c, &z, "seller");
             self.settle(Outcome::Cancelled);
         }
 
@@ -485,7 +506,13 @@ mod crypt {
         }
 
         pub fn terms(&self) -> (Amount, Amount, Amount, u64, u64) {
-            (self.price, self.seller_bond, self.buyer_bond, self.delivery_window, self.dispute_window)
+            (
+                self.price,
+                self.seller_bond,
+                self.buyer_bond,
+                self.delivery_window,
+                self.dispute_window,
+            )
         }
 
         pub fn deadlines(&self) -> (Option<u64>, Option<u64>) {
@@ -514,7 +541,7 @@ mod crypt {
         }
 
         /// The sale's context, bound into every proof, key tweak and keystream: this component's address.
-        fn context(&self) -> Vec<u8> {
+        fn context() -> Vec<u8> {
             CallerContext::current_component_address().as_bytes().to_vec()
         }
 
@@ -544,10 +571,13 @@ mod crypt {
             self.owed_buyer = buyer;
             self.stage = Stage::Settled;
             self.outcome = Some(outcome);
-            emit_event("crypt_settled", metadata! {
-                "outcome" => format!("{:?}", outcome),
-                "epoch" => Consensus::current_epoch().to_string(),
-            });
+            emit_event(
+                "crypt_settled",
+                metadata! {
+                    "outcome" => format!("{:?}", outcome),
+                    "epoch" => Consensus::current_epoch().to_string(),
+                },
+            );
         }
     }
 }

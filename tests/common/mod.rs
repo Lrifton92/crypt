@@ -96,29 +96,52 @@ impl Market {
         let seller = party(&mut test);
         let buyer = party(&mut test);
         let stranger = party(&mut test);
-        Self { test, seller, buyer, stranger, seller_key: Keypair::generate(&mut OsRng) }
+        Self {
+            test,
+            seller,
+            buyer,
+            stranger,
+            seller_key: Keypair::generate(&mut OsRng),
+        }
     }
 
     pub fn epoch(&mut self, epoch: u64) {
         set_epoch(&mut self.test, epoch);
     }
 
-    pub fn list_tx(&self, commitment: Hash64, seller_key: [u8; 32], payout: ComponentAddress, bond: u64, price: u64, buyer_bond: u64, windows: (u64, u64)) -> Transaction {
+    pub fn list_tx(
+        &self,
+        commitment: Hash64,
+        seller_key: [u8; 32],
+        payout: ComponentAddress,
+        bond: u64,
+        price: u64,
+        buyer_bond: u64,
+        windows: (u64, u64),
+    ) -> Transaction {
         let template = self.test.get_template_address("Crypt");
         self.test
             .transaction()
-            .call_method(self.seller.account, "withdraw", args![TARI_TOKEN, Amount::from_u64(bond)])
+            .call_method(
+                self.seller.account,
+                "withdraw",
+                args![TARI_TOKEN, Amount::from_u64(bond)],
+            )
             .put_last_instruction_output_on_workspace("bond")
-            .call_function(template, "list", args![
-                commitment,
-                Amount::from_u64(price),
-                Amount::from_u64(buyer_bond),
-                windows.0,
-                windows.1,
-                point(seller_key),
-                payout,
-                Workspace("bond")
-            ])
+            .call_function(
+                template,
+                "list",
+                args![
+                    commitment,
+                    Amount::from_u64(price),
+                    Amount::from_u64(buyer_bond),
+                    windows.0,
+                    windows.1,
+                    point(seller_key),
+                    payout,
+                    Workspace("bond")
+                ],
+            )
             .build_and_seal(&self.seller.key)
     }
 
@@ -141,12 +164,30 @@ impl Market {
             .expect("list returns the component address")
     }
 
-    pub fn buy_tx(&self, payer: &Party, crypt: ComponentAddress, base: [u8; 32], payout: ComponentAddress, proof: Proof, amount: u64) -> Transaction {
+    pub fn buy_tx(
+        &self,
+        payer: &Party,
+        crypt: ComponentAddress,
+        base: [u8; 32],
+        payout: ComponentAddress,
+        proof: Proof,
+        amount: u64,
+    ) -> Transaction {
         self.test
             .transaction()
             .call_method(payer.account, "withdraw", args![TARI_TOKEN, Amount::from_u64(amount)])
             .put_last_instruction_output_on_workspace("payment")
-            .call_method(crypt, "buy", args![point(base), payout, scalar(proof.c), scalar(proof.z), Workspace("payment")])
+            .call_method(
+                crypt,
+                "buy",
+                args![
+                    point(base),
+                    payout,
+                    scalar(proof.c),
+                    scalar(proof.z),
+                    Workspace("payment")
+                ],
+            )
             .build_and_seal(&payer.key)
     }
 
@@ -154,8 +195,20 @@ impl Market {
     pub fn buy_with(&mut self, crypt: ComponentAddress, base: &Keypair) -> Keypair {
         let ctx = context(crypt);
         let sale_key = base.for_sale(&ctx);
-        let proof = client::prove_action(&sale_key, &ctx, &client::msg_buy(self.buyer.account.as_bytes()), &mut OsRng);
-        let tx = self.buy_tx(&self.buyer.clone(), crypt, base.public(), self.buyer.account, proof, PRICE + BUYER_BOND);
+        let proof = client::prove_action(
+            &sale_key,
+            &ctx,
+            &client::msg_buy(self.buyer.account.as_bytes()),
+            &mut OsRng,
+        );
+        let tx = self.buy_tx(
+            &self.buyer.clone(),
+            crypt,
+            base.public(),
+            self.buyer.account,
+            proof,
+            PRICE + BUYER_BOND,
+        );
         self.test.execute_expect_success(tx, vec![self.buyer.proof.clone()]);
         sale_key
     }
@@ -166,7 +219,10 @@ impl Market {
 
     /// Any party sends one call; the proofs inside the arguments are what authorize it.
     pub fn call_tx(&self, who: &Party, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>) -> Transaction {
-        self.test.transaction().call_method(crypt, method, args).build_and_seal(&who.key)
+        self.test
+            .transaction()
+            .call_method(crypt, method, args)
+            .build_and_seal(&who.key)
     }
 
     pub fn ok(&mut self, who: &Party, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>) {
@@ -185,8 +241,18 @@ impl Market {
     }
 
     pub fn deliver_args_signed_by(signer: &Keypair, crypt: ComponentAddress, sealed: &client::Sealed) -> Vec<NamedArg> {
-        let proof = client::prove_action(signer, &context(crypt), &client::msg_deliver(&sealed.ephemeral, &sealed.ciphertext), &mut OsRng);
-        args![point(sealed.ephemeral), Bytes::from_vec(sealed.ciphertext.to_vec()), scalar(proof.c), scalar(proof.z)]
+        let proof = client::prove_action(
+            signer,
+            &context(crypt),
+            &client::msg_deliver(&sealed.ephemeral, &sealed.ciphertext),
+            &mut OsRng,
+        );
+        args![
+            point(sealed.ephemeral),
+            Bytes::from_vec(sealed.ciphertext.to_vec()),
+            scalar(proof.c),
+            scalar(proof.z)
+        ]
     }
 
     pub fn deliver_args(&self, crypt: ComponentAddress, sealed: &client::Sealed) -> Vec<NamedArg> {
@@ -194,15 +260,26 @@ impl Market {
     }
 
     pub fn accept_args(&self, sale: &Sale) -> Vec<NamedArg> {
-        proof_args(client::prove_action(&sale.buyer_key, &context(sale.crypt), client::MSG_ACCEPT, &mut OsRng))
+        proof_args(client::prove_action(
+            &sale.buyer_key,
+            &context(sale.crypt),
+            client::MSG_ACCEPT,
+            &mut OsRng,
+        ))
     }
 
     pub fn cancel_args(&self, crypt: ComponentAddress) -> Vec<NamedArg> {
-        proof_args(client::prove_action(&self.seller_key, &context(crypt), client::MSG_CANCEL, &mut OsRng))
+        proof_args(client::prove_action(
+            &self.seller_key,
+            &context(crypt),
+            client::MSG_CANCEL,
+            &mut OsRng,
+        ))
     }
 
     pub fn dispute_args(&self, sale: &Sale, ephemeral: &[u8; 32]) -> Vec<NamedArg> {
-        let (shared, proof) = client::prove_shared(&sale.buyer_key, &context(sale.crypt), ephemeral, &mut OsRng).unwrap();
+        let (shared, proof) =
+            client::prove_shared(&sale.buyer_key, &context(sale.crypt), ephemeral, &mut OsRng).unwrap();
         dispute_args(shared, proof)
     }
 
@@ -244,7 +321,11 @@ impl Market {
         let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
         let crypt = self.list(&block);
         let buyer_key = self.buy(crypt);
-        Sale { crypt, block, buyer_key }
+        Sale {
+            crypt,
+            block,
+            buyer_key,
+        }
     }
 
     /// list -> buy -> honest delivery.

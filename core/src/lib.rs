@@ -130,6 +130,7 @@ impl Keypair {
         Self { secret, public }
     }
 
+    #[must_use]
     pub fn public(&self) -> [u8; 32] {
         self.public
     }
@@ -140,6 +141,7 @@ impl Keypair {
     }
 
     /// The key this base key becomes in the sale identified by `context`: `b + H(context, B)`.
+    #[must_use]
     pub fn for_sale(&self, context: &[u8]) -> Self {
         Self::from_scalar(self.secret + tweak(context, &self.public))
     }
@@ -206,7 +208,8 @@ pub fn encode_plaintext<R: RngCore + CryptoRng>(secret: &[u8], rng: &mut R) -> R
     }
     let mut block = [0u8; PLAINTEXT_LEN];
     rng.fill_bytes(&mut block[..SALT_LEN]);
-    block[SALT_LEN..SALT_LEN + LEN_PREFIX].copy_from_slice(&(secret.len() as u16).to_le_bytes());
+    let len = u16::try_from(secret.len()).expect("bounded by MAX_SECRET_LEN");
+    block[SALT_LEN..SALT_LEN + LEN_PREFIX].copy_from_slice(&len.to_le_bytes());
     block[SALT_LEN + LEN_PREFIX..SALT_LEN + LEN_PREFIX + secret.len()].copy_from_slice(secret);
     Ok(block)
 }
@@ -225,12 +228,14 @@ pub fn decode_plaintext(block: &Block) -> Result<Vec<u8>, Error> {
 }
 
 /// The commitment published at listing time. Covers the whole block, salt and padding included.
+#[must_use]
 pub fn commitment_of(block: &Block) -> [u8; 64] {
     sha512_parts(&[&len_prefix(DOMAIN_COMMIT), DOMAIN_COMMIT, block])
 }
 
 /// `PLAINTEXT_LEN` bytes of keystream for one sale. The key binds the context and both public keys as
 /// well as the shared point, so the same `S` never yields the same keystream in two sales.
+#[must_use]
 pub fn keystream(context: &[u8], buyer_key: &[u8; 32], ephemeral: &[u8; 32], shared: &[u8; 32]) -> Block {
     let key = sha512_parts(&[
         &len_prefix(DOMAIN_KEY),
@@ -299,7 +304,10 @@ pub fn open_verified(
 /// Buyer side: decrypts a delivery without checking it. Prefer `open_verified`.
 pub fn open(keypair: &Keypair, context: &[u8], ephemeral: &[u8; 32], ciphertext: &Block) -> Result<Block, Error> {
     let shared = shared_point(keypair, ephemeral)?;
-    Ok(xor(ciphertext, &keystream(context, &keypair.public, ephemeral, &shared)))
+    Ok(xor(
+        ciphertext,
+        &keystream(context, &keypair.public, ephemeral, &shared),
+    ))
 }
 
 /// Schnorr proof by `keypair` over `message`, bound to the sale. Authorizes buy, deliver, accept and
@@ -310,13 +318,19 @@ pub fn prove_action<R: RngCore + CryptoRng>(keypair: &Keypair, context: &[u8], m
     let c = challenge(DOMAIN_AUTH, context, message, &[&keypair.public, &a]);
     let z = w + c * keypair.secret;
     w.zeroize();
-    Proof { c: c.to_bytes(), z: z.to_bytes() }
+    Proof {
+        c: c.to_bytes(),
+        z: z.to_bytes(),
+    }
 }
 
 /// Mirror of the template's check, for tests and for clients that want to pre-flight a transaction.
+#[must_use]
 pub fn verify_action(public: &[u8; 32], context: &[u8], message: &[u8], proof: &Proof) -> bool {
     let Ok(b) = decode_point(public) else { return false };
-    let (Some(c), Some(z)) = (canonical(&proof.c), canonical(&proof.z)) else { return false };
+    let (Some(c), Some(z)) = (canonical(&proof.c), canonical(&proof.z)) else {
+        return false;
+    };
     let a = (z * G - c * b).compress().to_bytes();
     challenge(DOMAIN_AUTH, context, message, &[public, &a]) == c
 }
@@ -333,18 +347,38 @@ pub fn prove_shared<R: RngCore + CryptoRng>(
     let mut w = Scalar::random(rng);
     let a1 = (w * G).compress().to_bytes();
     let a2 = (w * r_point).compress().to_bytes();
-    let c = challenge(DOMAIN_DLEQ, context, &[], &[&keypair.public, ephemeral, &shared, &a1, &a2]);
+    let c = challenge(
+        DOMAIN_DLEQ,
+        context,
+        &[],
+        &[&keypair.public, ephemeral, &shared, &a1, &a2],
+    );
     let z = w + c * keypair.secret;
     w.zeroize();
-    Ok((shared, Proof { c: c.to_bytes(), z: z.to_bytes() }))
+    Ok((
+        shared,
+        Proof {
+            c: c.to_bytes(),
+            z: z.to_bytes(),
+        },
+    ))
 }
 
 /// Mirror of the template's DLEQ check.
-pub fn verify_shared(buyer_key: &[u8; 32], ephemeral: &[u8; 32], shared: &[u8; 32], context: &[u8], proof: &Proof) -> bool {
+#[must_use]
+pub fn verify_shared(
+    buyer_key: &[u8; 32],
+    ephemeral: &[u8; 32],
+    shared: &[u8; 32],
+    context: &[u8],
+    proof: &Proof,
+) -> bool {
     let (Ok(b), Ok(r), Ok(s)) = (decode_point(buyer_key), decode_point(ephemeral), decode_point(shared)) else {
         return false;
     };
-    let (Some(c), Some(z)) = (canonical(&proof.c), canonical(&proof.z)) else { return false };
+    let (Some(c), Some(z)) = (canonical(&proof.c), canonical(&proof.z)) else {
+        return false;
+    };
     let a1 = (z * G - c * b).compress().to_bytes();
     let a2 = (z * r - c * s).compress().to_bytes();
     challenge(DOMAIN_DLEQ, context, &[], &[buyer_key, ephemeral, shared, &a1, &a2]) == c
@@ -403,7 +437,10 @@ mod tests {
 
     #[test]
     fn oversized_secrets_are_refused() {
-        assert_eq!(encode_plaintext(&[1u8; MAX_SECRET_LEN + 1], &mut OsRng), Err(Error::SecretTooLong));
+        assert_eq!(
+            encode_plaintext(&[1u8; MAX_SECRET_LEN + 1], &mut OsRng),
+            Err(Error::SecretTooLong)
+        );
         assert!(encode_plaintext(&[1u8; MAX_SECRET_LEN], &mut OsRng).is_ok());
     }
 
@@ -423,12 +460,24 @@ mod tests {
         let kp = Keypair::generate(&mut OsRng);
         let proof = prove_action(&kp, CTX, MSG_ACCEPT, &mut OsRng);
         assert!(verify_action(&kp.public(), CTX, MSG_ACCEPT, &proof));
-        assert!(!verify_action(&kp.public(), OTHER_CTX, MSG_ACCEPT, &proof), "replayed into another sale");
-        assert!(!verify_action(&kp.public(), CTX, MSG_CANCEL, &proof), "replayed as another action");
+        assert!(
+            !verify_action(&kp.public(), OTHER_CTX, MSG_ACCEPT, &proof),
+            "replayed into another sale"
+        );
+        assert!(
+            !verify_action(&kp.public(), CTX, MSG_CANCEL, &proof),
+            "replayed as another action"
+        );
         let other = Keypair::generate(&mut OsRng);
-        assert!(!verify_action(&other.public(), CTX, MSG_ACCEPT, &proof), "claimed for someone else's key");
+        assert!(
+            !verify_action(&other.public(), CTX, MSG_ACCEPT, &proof),
+            "claimed for someone else's key"
+        );
         let buy = prove_action(&kp, CTX, &msg_buy(b"account-1"), &mut OsRng);
-        assert!(!verify_action(&kp.public(), CTX, &msg_buy(b"account-2"), &buy), "copied to pay another account");
+        assert!(
+            !verify_action(&kp.public(), CTX, &msg_buy(b"account-2"), &buy),
+            "copied to pay another account"
+        );
     }
 
     #[test]
@@ -460,7 +509,10 @@ mod tests {
     fn open_verified_flags_what_to_dispute() {
         let (buyer, block, sealed) = sale(b"secret");
         let commitment = commitment_of(&block);
-        assert_eq!(open_verified(&buyer, CTX, &sealed.ephemeral, &sealed.ciphertext, &commitment).unwrap(), b"secret");
+        assert_eq!(
+            open_verified(&buyer, CTX, &sealed.ephemeral, &sealed.ciphertext, &commitment).unwrap(),
+            b"secret"
+        );
         let other = commitment_of(&encode_plaintext(b"secret", &mut OsRng).unwrap());
         assert_eq!(
             open_verified(&buyer, CTX, &sealed.ephemeral, &sealed.ciphertext, &other),
@@ -473,7 +525,13 @@ mod tests {
         let (buyer, _, sealed) = sale(b"secret");
         let (shared, proof) = prove_shared(&buyer, CTX, &sealed.ephemeral, &mut OsRng).unwrap();
         assert!(verify_shared(&buyer.public(), &sealed.ephemeral, &shared, CTX, &proof));
-        assert!(!verify_shared(&buyer.public(), &sealed.ephemeral, &shared, OTHER_CTX, &proof));
+        assert!(!verify_shared(
+            &buyer.public(),
+            &sealed.ephemeral,
+            &shared,
+            OTHER_CTX,
+            &proof
+        ));
 
         // A buyer who lies about S to fake a fraud must fail.
         let liar = (Scalar::from(7u64) * G).compress().to_bytes();

@@ -15,7 +15,9 @@ use common::*;
 fn the_template_and_the_client_hash_a_block_identically() {
     let mut m = Market::new();
     let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
-    let on_chain: Hash64 = m.test.call_function("Crypt", "commitment_of", args![Bytes::from_vec(block.to_vec())], vec![]);
+    let on_chain: Hash64 =
+        m.test
+            .call_function("Crypt", "commitment_of", args![Bytes::from_vec(block.to_vec())], vec![]);
     assert_eq!(on_chain, Hash64::from(client::commitment_of(&block)));
 }
 
@@ -36,12 +38,21 @@ fn an_honest_sale_pays_the_seller_and_returns_both_bonds() {
     let buyer = m.buyer.clone();
 
     // The buyer reads the delivery from the ledger and opens it off-chain, checked against the listing.
-    let (ephemeral, ciphertext): (RistrettoPublicKeyBytes, Bytes) =
-        m.test.call_method::<Option<_>>(sale.crypt, "delivery", args![], vec![]).unwrap();
+    let (ephemeral, ciphertext): (RistrettoPublicKeyBytes, Bytes) = m
+        .test
+        .call_method::<Option<_>>(sale.crypt, "delivery", args![], vec![])
+        .unwrap();
     let ciphertext: client::Block = ciphertext.as_slice().try_into().unwrap();
     let commitment: Hash64 = m.test.call_method(sale.crypt, "commitment", args![], vec![]);
     let commitment: [u8; 64] = commitment.as_ref().try_into().unwrap();
-    let secret = client::open_verified(&sale.buyer_key, &context(sale.crypt), &ephemeral.into_array(), &ciphertext, &commitment).unwrap();
+    let secret = client::open_verified(
+        &sale.buyer_key,
+        &context(sale.crypt),
+        &ephemeral.into_array(),
+        &ciphertext,
+        &commitment,
+    )
+    .unwrap();
     assert_eq!(secret, SECRET);
 
     let args = m.accept_args(&sale);
@@ -50,8 +61,16 @@ fn an_honest_sale_pays_the_seller_and_returns_both_bonds() {
     assert_eq!(m.owed(sale.crypt), (a(PRICE + SELLER_BOND), a(BUYER_BOND)));
 
     m.pay_out(sale.crypt);
-    assert_eq!(m.balance(m.seller.account), seller_before + a(PRICE), "seller: + price, bond back");
-    assert_eq!(m.balance(m.buyer.account), buyer_before - a(PRICE), "buyer: - price, bond back");
+    assert_eq!(
+        m.balance(m.seller.account),
+        seller_before + a(PRICE),
+        "seller: + price, bond back"
+    );
+    assert_eq!(
+        m.balance(m.buyer.account),
+        buyer_before - a(PRICE),
+        "buyer: - price, bond back"
+    );
 }
 
 #[test]
@@ -63,7 +82,10 @@ fn a_false_dispute_pays_the_seller_and_costs_the_buyer_the_bond() {
     m.ok(&buyer, sale.crypt, "dispute", args);
 
     assert_eq!(m.outcome(sale.crypt).as_deref(), Some("DisputeRejected"));
-    assert_eq!(m.owed(sale.crypt), (a(PRICE + SELLER_BOND + BUYER_BOND), Amount::zero()));
+    assert_eq!(
+        m.owed(sale.crypt),
+        (a(PRICE + SELLER_BOND + BUYER_BOND), Amount::zero())
+    );
     m.refused(&buyer, sale.crypt, "pay_buyer", args![], "nothing owed");
     m.pay_out(sale.crypt);
 }
@@ -82,14 +104,23 @@ fn a_seller_who_delivers_something_else_loses_the_sale_and_the_bond() {
     // The client flags it before the buyer does anything.
     let commitment = client::commitment_of(&sale.block);
     assert_eq!(
-        client::open_verified(&sale.buyer_key, &context(sale.crypt), &sealed.ephemeral, &sealed.ciphertext, &commitment),
+        client::open_verified(
+            &sale.buyer_key,
+            &context(sale.crypt),
+            &sealed.ephemeral,
+            &sealed.ciphertext,
+            &commitment
+        ),
         Err(client::Error::CommitmentMismatch)
     );
 
     let args = m.dispute_args(&sale, &sealed.ephemeral);
     m.ok(&buyer, sale.crypt, "dispute", args);
     assert_eq!(m.outcome(sale.crypt).as_deref(), Some("Fraud"));
-    assert_eq!(m.owed(sale.crypt), (Amount::zero(), a(PRICE + BUYER_BOND + SELLER_BOND)));
+    assert_eq!(
+        m.owed(sale.crypt),
+        (Amount::zero(), a(PRICE + BUYER_BOND + SELLER_BOND))
+    );
     m.refused(&seller, sale.crypt, "pay_seller", args![], "nothing owed");
     m.pay_out(sale.crypt);
 }
@@ -116,7 +147,11 @@ fn no_delivery_returns_everything_to_the_buyer() {
     m.ok(&stranger, sale.crypt, "claim_undelivered", args![]);
     assert_eq!(m.outcome(sale.crypt).as_deref(), Some("Undelivered"));
     m.pay_out(sale.crypt);
-    assert_eq!(m.balance(m.buyer.account), buyer_before + a(SELLER_BOND), "buyer: everything back, plus the seller's bond");
+    assert_eq!(
+        m.balance(m.buyer.account),
+        buyer_before + a(SELLER_BOND),
+        "buyer: everything back, plus the seller's bond"
+    );
 }
 
 #[test]

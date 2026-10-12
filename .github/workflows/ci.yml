@@ -5,29 +5,42 @@ on:
     branches: [main]
   pull_request:
 
+# Every job builds from the committed Cargo.lock (`--locked`): what CI tested is what ships.
 jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Formatting
+        run: cargo fmt --all --check
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Known vulnerabilities in dependencies (RustSec)
+        run: cargo audit --deny warnings
+
   client:
     # The client-side cryptography on its own: sealing, opening, both proofs, property tests.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       - name: Test crypt_core
-        run: cargo test -p crypt_core --verbose
+        run: cargo test -p crypt_core --locked
       - name: Lint crypt_core
-        run: cargo clippy -p crypt_core --all-targets -- -D warnings
+        run: cargo clippy -p crypt_core --all-targets --locked -- -D warnings
 
   template:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install the wasm target
         run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Build the template
-        run: cargo build -p crypt --release --target wasm32-unknown-unknown
+        run: cargo build -p crypt --release --target wasm32-unknown-unknown --locked
       - name: Lint
-        run: cargo clippy -p crypt --release --target wasm32-unknown-unknown -- -D warnings
+        run: cargo clippy -p crypt --release --target wasm32-unknown-unknown --locked -- -D warnings
       - name: Report the artefact size
         run: ls -l target/wasm32-unknown-unknown/release/crypt.wasm
 
@@ -37,11 +50,11 @@ jobs:
     # Linux only: the engine pulls a Cranelift JIT that does not build on Windows.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install the wasm target
         run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Play every sale
-        run: cargo test -p crypt --test end_to_end
+        run: cargo test -p crypt --test end_to_end --locked
       - name: Play every attack
-        run: cargo test -p crypt --test attacks
+        run: cargo test -p crypt --test attacks --locked

@@ -11,7 +11,6 @@ publish = false
 
 [dependencies]
 tari_template_lib = "0.34.0"
-tari_template_abi = "0.20.1"
 
 [lib]
 crate-type = ["cdylib"]
