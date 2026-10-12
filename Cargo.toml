@@ -1,5 +1,5 @@
 [workspace]
-members = ["core"]
+members = ["core", "cli"]
 exclude = ["tests/templates/evil"]
 
 [package]

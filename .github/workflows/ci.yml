@@ -20,7 +20,7 @@ jobs:
         run: cargo audit --deny warnings
 
   client:
-    # The client-side cryptography on its own: sealing, opening, both proofs, property tests.
+    # The client side on its own: crypt_core (sealing, opening, proofs, property tests) and the CLI.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -29,6 +29,10 @@ jobs:
         run: cargo test -p crypt_core --locked
       - name: Lint crypt_core
         run: cargo clippy -p crypt_core --all-targets --locked -- -D warnings
+      - name: Test the crypt CLI (a whole sale through the binary)
+        run: cargo test -p crypt_cli --locked
+      - name: Lint the crypt CLI
+        run: cargo clippy -p crypt_cli --all-targets --locked -- -D warnings
 
   template:
     runs-on: ubuntu-latest

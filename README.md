@@ -60,12 +60,47 @@ seller                            template                              buyer
 template proves you got what was committed, not that it is worth the price, and a dispute makes the
 secret public.
 
+## Using it: the `crypt` CLI
+
+`cli/` builds `crypt`, the offline half of a sale. It computes every value a transaction needs and
+prints `name=hex` lines; you pass them to the template through your wallet. It never touches the
+network, never takes a secret on the command line (secrets and keys live in files) and never
+overwrites a key or block file.
+
+Seller:
+
+```sh
+crypt keygen --out seller.key                         # prints public_key: the seller_key for `list`
+crypt commit --secret-file secret.txt --out block.hex # prints the commitment; keep block.hex private
+# list(commitment, price, buyer_bond, delivery_window, dispute_window, seller_key, payout, bond)
+crypt seal --seller-key seller.key --block block.hex --component <crypt> --buyer-key <buyer_key>
+# deliver(ephemeral, ephemeral_c, ephemeral_z, ciphertext, c, z)
+crypt cancel --seller-key seller.key --component <crypt>   # cancel(c, z), before a sale only
+```
+
+Buyer:
+
+```sh
+crypt keygen --out buyer.key                          # a base key; each sale derives its own key
+crypt buy --base-key buyer.key --component <crypt> --payout <account>
+# buy(buyer_key, payout, c, z, payment)
+crypt open --base-key buyer.key --component <crypt> --ephemeral <R> --ciphertext <C> --commitment <m>
+# prints the secret, or exits with status 2: "dispute: ..."
+crypt accept  --base-key buyer.key --component <crypt> --ephemeral <R>                       # accept(c, z)
+crypt dispute --base-key buyer.key --component <crypt> --ephemeral <R> --registered <buyer_key>
+# dispute(shared, c, z), sent well before the deadline
+```
+
+Anyone, once settled: `pay_seller()`, `pay_buyer()`. Once a window has passed: `claim_undelivered()`,
+`claim_uncontested()`.
+
 ## Layout
 
 * `src/lib.rs`: the template. Group arithmetic and hashing through the engine's intrinsics
   (`tari_template_lib` 0.34).
 * `core/`: `crypt_core`, the client side (sealing, opening, the action proofs and the DLEQ proof) in
   `curve25519-dalek` + `sha2`.
+* `cli/`: the `crypt` binary above, with a test that runs a whole sale through it.
 * `tests/end_to_end.rs`: every way a sale can end, balances checked down to the accounts.
 * `tests/attacks.rs`: the attack battery, including a hostile template (`tests/templates/evil`) and a
   scan of everything the ledger shows. The client code produces every input: if the client and the
@@ -74,7 +109,7 @@ secret public.
 ## Build and test
 
 ```sh
-cargo test -p crypt_core                                       # client cryptography, property tests
+cargo test -p crypt_core -p crypt_cli                          # client cryptography, property tests, CLI
 rustup target add wasm32-unknown-unknown
 cargo build -p crypt --release --target wasm32-unknown-unknown # the template
 cargo test -p crypt --tests                                    # Linux/macOS: the engine's JIT does not build on Windows
