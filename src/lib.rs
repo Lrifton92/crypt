@@ -4,11 +4,12 @@
 //! # Crypt
 //!
 //! A private, verifiable sale of a secret on the Tari Ootle, with disputes settled by the template
-//! itself. No arbiter, no oracle, no trusted third party, and no account: nobody's wallet appears in a
-//! sale.
+//! itself. No arbiter, no oracle, no trusted third party, and no account: funds come from and go back
+//! to stealth outputs.
 //!
 //! 1. `list`: the seller publishes `commitment = H(salt || len || secret || padding)`, a price, a
-//!    bond for each side and a seller key `K`, and puts their bond in escrow.
+//!    bond for each side and a listing key `K` (derived client-side per listing), and puts their bond
+//!    in escrow.
 //! 2. `buy`: the buyer pays price + bond and registers a sale key `B'` (derived client-side from a
 //!    base secret by hashing, never reused), proving they hold it.
 //! 3. `deliver`: the seller posts `R = r·G` with a proof of knowledge of `r`, and the block encrypted
@@ -25,16 +26,21 @@
 //!    outputs, signed by that side's Crypt key over the transfer's digest. Nobody can redirect it,
 //!    reveal it to someone else or add to it.
 //!
-//! **Where Tari's privacy does the work.** Both sides fund their part from stealth UTXOs (the bucket
-//! comes out of a stealth transfer, and the transaction fee can be paid from it too), and both are paid
-//! back into new stealth outputs. The ledger shows a component, a price, keys used for this sale only
-//! and Pedersen commitments; not who sold, who bought, or where the money went.
+//! **Where Tari's privacy does the work.** Both sides fund their part by spending stealth UTXOs and
+//! are paid back into new stealth outputs, so a sale needs no account and its own transactions name
+//! none. What stays visible: the amounts of the sale, the per-listing and per-sale keys, the
+//! commitments of the coins spent into it and of the outputs paying out of it, and whoever signs and
+//! pays fees for each transaction. As with any UTXO currency without decoys, those coins link to their
+//! holders' other transactions; see THREAT_MODEL.md for what to do about it.
 //!
 //! **Authorization never uses the transaction signer.** Every action carries a proof by the acting
-//! side's Crypt key (the seller key `K`, the buyer's sale key `B'`), which lives in the Crypt client,
-//! not in the wallet. A hostile component called in
-//! the same transaction cannot accept, deliver, cancel or take a payout on anyone's behalf. The
-//! component has no owner (`OwnerRule::None`), so nobody can change its rules after creation.
+//! side's Crypt key (the listing key `K`, the buyer's sale key `B'`), which lives in the Crypt client,
+//! not in the wallet. A hostile component called in the same transaction cannot accept, deliver,
+//! cancel or take a payout on anyone's behalf. The component has no owner (`OwnerRule::None`), so
+//! nobody can change its rules after creation.
+//!
+//! **The Crypt key is the only way to collect what is owed.** Lose it and the escrowed share stays
+//! where it is. Back it up.
 //!
 //! The proof of `r` is what keeps a dispute from leaking anything: it publishes `b'·R`, and since the
 //! seller had to know `r`, that is `r·B'`, a value the seller already had. Without it, a seller could
@@ -224,7 +230,7 @@ pub enum Stage {
     /// Delivered, waiting for the buyer to accept or dispute.
     #[n(2)]
     Delivered,
-    /// Final. Each side's payout can be sent to its account.
+    /// Final. Each side collects what it is owed with `pay_seller` / `pay_buyer`.
     #[n(3)]
     Settled,
 }
@@ -307,8 +313,6 @@ mod crypt {
             // A token whose issuer keeps recall, freeze or an authorization hook could empty or lock
             // the escrow, and a template cannot read those rules. Native XTM has none of them.
             assert!(seller_bond.resource_address() == TARI_TOKEN, "only XTM is accepted");
-            // Revealed funds only: escrow accounting counts revealed amounts, nothing hidden may enter.
-            seller_bond.assert_contains_no_confidential_funds();
             assert!(seller_bond.amount().is_positive(), "seller bond must be positive");
             assert_valid_point(&seller_key, "seller key");
 
@@ -349,7 +353,6 @@ mod crypt {
             assert_authorized(&Self::context(), &buyer_key, MSG_BUY, &c, &z, "buyer");
 
             assert!(payment.resource_address() == TARI_TOKEN, "only XTM is accepted");
-            payment.assert_contains_no_confidential_funds();
             let due = self.price + self.buyer_bond;
             assert!(payment.amount() == due, "payment must be exactly {}", due);
             self.escrow.deposit(payment);
@@ -484,9 +487,10 @@ mod crypt {
         /// key. Separate from `pay_seller`, so one side can never hold up the other's funds.
         pub fn pay_buyer(&mut self, statement: StealthTransferStatement, c: Scalar32Bytes, z: Scalar32Bytes) {
             assert!(self.stage == Stage::Settled, "not settled");
+            assert!(self.owed_buyer.is_positive(), "nothing owed");
             let amount = self.owed_buyer;
             self.owed_buyer = Amount::zero();
-            let key = self.buyer_key.expect("no buyer");
+            let key = self.buyer_key.expect("a buyer is owed something only after buying");
             self.pay(amount, &key, MSG_PAY_BUYER, statement, &c, &z, "buyer");
         }
 
@@ -584,6 +588,12 @@ mod crypt {
             assert!(
                 !statement.outputs_statement.outputs.is_empty(),
                 "a payout needs stealth outputs"
+            );
+            // The engine already refuses claims with no stealth input to attach to; checking here keeps
+            // the rule ours and the error readable.
+            assert!(
+                statement.covenant_claims.is_empty(),
+                "a payout carries no covenant claims"
             );
             let message = [action, statement_digest(&statement).as_ref()].concat();
             assert_authorized(&Self::context(), key, &message, c, z, who);

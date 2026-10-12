@@ -60,6 +60,8 @@ pub const DOMAIN_AUTH: &[u8] = b"tari.ootle.crypt.auth.v1";
 pub const DOMAIN_STATEMENT: &[u8] = b"tari.ootle.crypt.statement.v1";
 /// Client-only: derivation of a buyer's sale key from their base secret.
 pub const DOMAIN_SALE_KEY: &[u8] = b"tari.ootle.crypt.sale-key.v1";
+/// Client-only: derivation of a seller's listing key from their base secret.
+pub const DOMAIN_LISTING_KEY: &[u8] = b"tari.ootle.crypt.listing-key.v1";
 
 // The keystream is whole SHA-512 blocks indexed by a single byte.
 const _: () = assert!(PLAINTEXT_LEN.is_multiple_of(64) && PLAINTEXT_LEN / 64 <= 256);
@@ -177,19 +179,24 @@ impl Keypair {
     /// use, and the base key itself never appears on-chain.
     #[must_use]
     pub fn for_sale(&self, context: &[u8]) -> Self {
+        self.derive(DOMAIN_SALE_KEY, context)
+    }
+
+    /// The seller's key for the listing whose commitment is `commitment` (unique, as it is salted).
+    /// One key per listing, so an observer cannot group a seller's listings by key.
+    #[must_use]
+    pub fn for_listing(&self, commitment: &[u8; 64]) -> Self {
+        self.derive(DOMAIN_LISTING_KEY, commitment)
+    }
+
+    fn derive(&self, domain: &[u8], context: &[u8]) -> Self {
         let mut secret = self.secret.to_bytes();
-        let wide = sha512_parts(&[
-            &len_prefix(DOMAIN_SALE_KEY),
-            DOMAIN_SALE_KEY,
-            &secret,
-            &len_prefix(context),
-            context,
-        ]);
+        let wide = sha512_parts(&[&len_prefix(domain), domain, &secret, &len_prefix(context), context]);
         secret.zeroize();
         let derived = Scalar::from_bytes_mod_order_wide(&wide);
         // A zero scalar is a 2^-252 event; deriving again under a marker keeps the function total.
         if derived == Scalar::ZERO {
-            return self.for_sale(&[context, b"\x00"].concat());
+            return self.derive(domain, &[context, b" ".as_slice()].concat());
         }
         Self::from_scalar(derived)
     }
@@ -622,6 +629,17 @@ mod tests {
             "deterministic, so the buyer can recover it"
         );
         assert_ne!(a.secret_bytes(), base.secret_bytes());
+        let listing = base.for_listing(&[1u8; 64]);
+        assert_ne!(
+            listing.public(),
+            base.for_listing(&[2u8; 64]).public(),
+            "one key per listing"
+        );
+        assert_ne!(
+            listing.public(),
+            base.for_sale(&[1u8; 64]).public(),
+            "listing and sale keys never coincide"
+        );
     }
 
     #[test]

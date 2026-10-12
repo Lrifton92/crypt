@@ -8,6 +8,8 @@
 mod common;
 use common::*;
 
+use tari_template_lib_types::stealth::CovenantBalanceClaim;
+
 use curve25519_dalek::{constants::RISTRETTO_BASEPOINT_POINT as G, ristretto::CompressedRistretto, scalar::Scalar};
 
 fn random_point() -> [u8; 32] {
@@ -81,10 +83,12 @@ fn assert_nowhere(label: &str, raw: &[u8], text: &str, needle: &[u8], what: &str
 }
 
 /// A whole sale, list to payout, inspecting every transaction of the sale and every result as an
-/// observer of the network would. Nothing may reveal the secret, its salt, the shared point, or any
-/// account: the parties pay from stealth coins and are paid into stealth outputs.
+/// observer of the network would. Nothing may reveal the secret, its salt or the shared point, and no
+/// account appears in the sale's own transactions: the parties pay from stealth coins and are paid
+/// into stealth outputs. (The coins themselves still link to the transactions that created them; see
+/// THREAT_MODEL.md.)
 #[test]
-fn nothing_on_the_ledger_reveals_the_secret_or_who_took_part() {
+fn nothing_on_the_ledger_reveals_the_secret_and_no_account_appears_in_the_sale() {
     let mut m = Market::new();
     let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
     let salt = block[..client::SALT_LEN].to_vec();
@@ -897,6 +901,33 @@ fn each_payout_happens_once() {
     m.refused(sale.crypt, "pay_seller", args, "nothing owed");
     // The buyer's share is untouched.
     assert_eq!(m.owed(sale.crypt), (Amount::zero(), a(BUYER_BOND)));
+}
+
+#[test]
+fn a_payout_carries_no_covenant_claims() {
+    let mut m = Market::new();
+    let sale = accepted(&mut m);
+    let mut statement = payout_statement(PRICE + SELLER_BOND).statement;
+    let signature = statement.balance_proof.clone().unwrap();
+    statement.covenant_claims.push(CovenantBalanceClaim {
+        partition_input_index: 0,
+        revealed_amount: Amount::zero(),
+        signature,
+    });
+    let args = payout_args(&m.seller_key, sale.crypt, Side::Seller, &statement);
+    m.refused(sale.crypt, "pay_seller", args, "a payout carries no covenant claims");
+}
+
+#[test]
+fn nothing_is_owed_to_a_buyer_who_never_was() {
+    let mut m = Market::new();
+    let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+    let crypt = m.list(&block);
+    let args = m.cancel_args(crypt);
+    m.ok(crypt, "cancel", args);
+    let statement = payout_statement(1).statement;
+    let args = payout_args(&Keypair::generate(&mut OsRng), crypt, Side::Buyer, &statement);
+    m.refused(crypt, "pay_buyer", args, "nothing owed");
 }
 
 #[test]

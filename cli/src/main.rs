@@ -8,7 +8,7 @@
 //! the network, and no secret is ever taken from the command line: secrets and keys live in files,
 //! so they stay out of shell history and process listings.
 //!
-//! Seller: `keygen` → `commit` → list → `seal` → deliver → `payout`. Buyer: `keygen` (a base key) →
+//! Seller: `keygen` (a base key) → `commit` → list → `seal` → deliver → `payout`. Buyer: `keygen` (a base key) →
 //! `buy` → `open` → `accept`, or `dispute` if `open` says so → `payout` if owed anything.
 //!
 //! Funds come from and go back to stealth outputs: the wallet builds the stealth transfers, this tool
@@ -25,7 +25,10 @@ use std::{
 use clap::{Parser, Subcommand};
 use crypt_core::{self as core, Keypair, Proof};
 use rand_core::OsRng;
-use tari_template_lib_types::{stealth::StealthTransferStatement, ComponentAddress};
+use tari_template_lib_types::{
+    stealth::{SpendAuthorization, StealthTransferStatement},
+    Amount, ComponentAddress,
+};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -37,19 +40,23 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Creates a secret key file: the seller key, or a buyer base key. Never overwrites a file.
+    /// Creates a base key file, for a seller or a buyer. Every listing and every purchase derives its
+    /// own key from it. Never overwrites a file. Back it up: it is the only way to collect what a
+    /// sale owes you.
     Keygen {
         #[arg(long)]
         out: PathBuf,
     },
-    /// Prints the public key of a key file (the seller key `list` takes).
+    /// Prints the public key of a key file.
     Public {
         #[arg(long)]
         key: PathBuf,
     },
     /// Seller: lays the secret out in a salted block, writes the block to `--out` (keep it private
-    /// until delivery) and prints the commitment to list.
+    /// until delivery), and prints the commitment and this listing's seller key for `list`.
     Commit {
+        #[arg(long)]
+        seller_key: PathBuf,
         #[arg(long)]
         secret_file: PathBuf,
         #[arg(long)]
@@ -66,6 +73,9 @@ enum Command {
     Seal {
         #[arg(long)]
         seller_key: PathBuf,
+        /// The listing's commitment, which selects the listing key.
+        #[arg(long)]
+        commitment: String,
         #[arg(long)]
         block: PathBuf,
         #[arg(long)]
@@ -116,20 +126,34 @@ enum Command {
         #[arg(long)]
         seller_key: PathBuf,
         #[arg(long)]
+        commitment: String,
+        #[arg(long)]
         component: String,
     },
-    /// Either side, once settled: signs the stealth transfer that pays you, as built by your wallet
-    /// (hex-encoded CBOR `StealthTransferStatement` in `--statement`). Seller: `--seller-key`. Buyer:
-    /// `--base-key`. Prints the digest signed and the proof for `pay_seller` / `pay_buyer`.
+    /// Either side, once settled: checks and signs the stealth transfer that pays you, as built by
+    /// your wallet (hex-encoded CBOR `StealthTransferStatement` in `--statement`). Refuses anything the
+    /// template would refuse or that does not pay exactly `--owed` into stealth outputs, and prints
+    /// what it signs. Check those outputs are yours: a signature sends the funds where they say.
     Payout {
-        #[arg(long, conflicts_with = "base_key", required_unless_present = "base_key")]
+        #[arg(
+            long,
+            conflicts_with = "base_key",
+            required_unless_present = "base_key",
+            requires = "commitment"
+        )]
         seller_key: Option<PathBuf>,
+        /// Seller only: the listing's commitment, which selects the listing key.
+        #[arg(long)]
+        commitment: Option<String>,
         #[arg(long)]
         base_key: Option<PathBuf>,
         #[arg(long)]
         component: String,
         #[arg(long)]
         statement: PathBuf,
+        /// What the template's `owed()` shows for your side.
+        #[arg(long)]
+        owed: u64,
     },
 }
 
@@ -151,14 +175,25 @@ fn run(command: Command) -> Result<ExitCode, String> {
         Command::Keygen { out } => {
             let key = Keypair::generate(&mut OsRng);
             write_private(&out, &Zeroizing::new(hex::encode(*key.secret_bytes())))?;
+            eprintln!(
+                "back up {}: it is the only way to collect what a sale owes you",
+                out.display()
+            );
             print_hex("public_key", &key.public());
         }
         Command::Public { key } => print_hex("public_key", &read_key(&key)?.public()),
-        Command::Commit { secret_file, out } => {
+        Command::Commit {
+            seller_key,
+            secret_file,
+            out,
+        } => {
+            let base = read_key(&seller_key)?;
             let secret = Zeroizing::new(fs::read(&secret_file).map_err(|e| io_error(&secret_file, &e))?);
             let block = Zeroizing::new(core::encode_plaintext(&secret, &mut OsRng).map_err(describe)?);
             write_private(&out, &Zeroizing::new(hex::encode(*block)))?;
-            print_hex("commitment", &core::commitment_of(&block));
+            let commitment = core::commitment_of(&block);
+            print_hex("commitment", &commitment);
+            print_hex("seller_key", &base.for_listing(&commitment).public());
         }
         Command::Buy { base_key, component } => {
             let ctx = context(&component)?;
@@ -168,12 +203,13 @@ fn run(command: Command) -> Result<ExitCode, String> {
         }
         Command::Seal {
             seller_key,
+            commitment,
             block,
             component,
             buyer_key,
         } => {
             let ctx = context(&component)?;
-            let seller = read_key(&seller_key)?;
+            let seller = read_key(&seller_key)?.for_listing(&hex_array(&commitment, "commitment")?);
             let block = read_block(&block)?;
             let sealed = core::seal(&block, &hex32(&buyer_key, "buyer key")?, &ctx, &mut OsRng).map_err(describe)?;
             let signature = core::prove_action(
@@ -241,13 +277,19 @@ fn run(command: Command) -> Result<ExitCode, String> {
         }
         Command::Payout {
             seller_key,
+            commitment,
             base_key,
             component,
             statement,
-        } => payout(seller_key, base_key, &component, &statement)?,
-        Command::Cancel { seller_key, component } => {
+            owed,
+        } => payout(seller_key, commitment, base_key, &component, &statement, owed)?,
+        Command::Cancel {
+            seller_key,
+            commitment,
+            component,
+        } => {
             let ctx = context(&component)?;
-            let seller = read_key(&seller_key)?;
+            let seller = read_key(&seller_key)?.for_listing(&hex_array(&commitment, "commitment")?);
             print_proof("", &core::prove_action(&seller, &ctx, core::MSG_CANCEL, &mut OsRng));
         }
     }
@@ -256,27 +298,69 @@ fn run(command: Command) -> Result<ExitCode, String> {
 
 fn payout(
     seller_key: Option<PathBuf>,
+    commitment: Option<String>,
     base_key: Option<PathBuf>,
     component: &str,
     statement: &Path,
+    owed: u64,
 ) -> Result<(), String> {
     let ctx = context(component)?;
-    let (key, action) = match (seller_key, base_key) {
-        (Some(path), None) => (read_key(&path)?, core::MSG_PAY_SELLER),
-        (None, Some(path)) => (read_key(&path)?.for_sale(&ctx), core::MSG_PAY_BUYER),
-        _ => return Err("give exactly one of --seller-key or --base-key".into()),
+    let (key, action) = match (seller_key, commitment, base_key) {
+        (Some(path), Some(commitment), None) => (
+            read_key(&path)?.for_listing(&hex_array(&commitment, "commitment")?),
+            core::MSG_PAY_SELLER,
+        ),
+        (None, _, Some(path)) => (read_key(&path)?.for_sale(&ctx), core::MSG_PAY_BUYER),
+        _ => return Err("give --seller-key with --commitment, or --base-key".into()),
     };
     let text = fs::read_to_string(statement).map_err(|e| io_error(statement, &e))?;
     let bytes = hex::decode(text.trim()).map_err(|e| format!("{}: not hex ({e})", statement.display()))?;
     // Decoded and re-encoded, so the digest is over the canonical encoding the template computes.
     let decoded: StealthTransferStatement =
         tari_bor::decode(&bytes).map_err(|e| format!("{}: not a stealth transfer ({e})", statement.display()))?;
+    check_payout(&decoded, owed)?;
+    for (i, output) in decoded.outputs_statement.outputs.iter().enumerate() {
+        let auth = match &output.auth {
+            SpendAuthorization::Key(k) => format!("key {}", hex::encode(k.as_bytes())),
+            SpendAuthorization::Script(root) => format!("script {}", hex::encode(root)),
+            other => format!("{other:?}"),
+        };
+        eprintln!(
+            "output {i}: commitment {} spendable by {auth}",
+            hex::encode(output.commitment().as_bytes())
+        );
+    }
     let digest = core::statement_digest(&tari_bor::encode(&decoded).map_err(|e| e.to_string())?);
     print_hex("digest", &digest);
     print_proof(
         "",
         &core::prove_action(&key, &ctx, &core::msg_pay(action, &digest), &mut OsRng),
     );
+    Ok(())
+}
+
+/// The template's own payout rules, checked before signing: a signature is only ever produced for a
+/// transfer the template would accept, that pays exactly what is owed, into stealth outputs only.
+fn check_payout(statement: &StealthTransferStatement, owed: u64) -> Result<(), String> {
+    let refuse = |why: &str| Err(format!("refusing to sign: {why}"));
+    if !statement.inputs_statement.inputs.is_empty() {
+        return refuse("the transfer spends stealth inputs; a payout spends the escrow only");
+    }
+    if statement.inputs_statement.revealed_amount != Amount::from_u64(owed) {
+        return refuse(&format!(
+            "the transfer takes {} from the escrow, not the {owed} owed",
+            statement.inputs_statement.revealed_amount
+        ));
+    }
+    if statement.outputs_statement.revealed_output.is_some() {
+        return refuse("the transfer reveals funds to someone; a payout goes to stealth outputs only");
+    }
+    if statement.outputs_statement.outputs.is_empty() {
+        return refuse("the transfer has no stealth outputs");
+    }
+    if !statement.covenant_claims.is_empty() {
+        return refuse("the transfer carries covenant claims");
+    }
     Ok(())
 }
 
