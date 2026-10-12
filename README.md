@@ -12,13 +12,15 @@ Built for the Tari Ootle "Spooky Secrets" showcase (October 2026).
 seller                            template                              buyer
   | list(commitment, price, bonds,   |                                     |
   |      windows, K, payout) + bond->|  escrow: seller bond (XTM)          |
-  |                                  |<- buy(B, payout, proof by B')       |
+  |                                  |<- buy(B', payout, proof by B')      |
   |                                  |   + price + buyer bond              |
-  |                                  |   B' = B + H(sale, B)·G             |
-  | deliver(R, C, proof by K) ------>|  C = block XOR stream(S),           |
-  |                                  |  S = r·B', public on-chain          |
+  |                                  |   (b' = H(b, sale), client-side)    |
+  | deliver(R, proof of r,           |                                     |
+  |         C, proof by K) --------->|  C = block XOR stream(S), S = r·B'  |
+  |                                  |  R and C public, S is not           |
   |                                  |                     open with S = b'·R
-  |                                  |<----------- accept(proof by B')     |   or
+  |                                  |<----------- accept(proof by B'      |
+  |                                  |                    over R)          |   or
   |                                  |<----------- dispute(S, DLEQ)        |
   |                                  |  verify DLEQ, decrypt C, hash,      |
   |                                  |  check layout, compare              |
@@ -45,8 +47,11 @@ seller                            template                              buyer
   hostile component the victim calls in the same transaction cannot act for them.
 * A dispute reveals `S` with a Chaum-Pedersen DLEQ proof that `log_G(B') = log_R(S)`. The buyer cannot
   lie about `S`; the template decrypts what the seller posted and decides.
-* The buyer's key is tweaked per sale, so a seller who reposts another sale's delivery cannot make a
-  dispute leak that other sale.
+* The seller must prove knowledge of `r` for the `R` they deliver. So a dispute only ever publishes
+  `r·B'`, a value the seller already had: no seller can use a dispute to pull another sale's secret
+  out of a buyer, even one who reuses keys. (A second review pass found exactly that leak in an earlier
+  design; the test that replays it is in `attacks.rs`.)
+* Buyer sale keys are hashes of a base secret and the sale, so they are unrelated to each other.
 * Only revealed XTM: no token whose issuer can recall or freeze funds can drain or lock the escrow.
 * Payouts go only to the built-in accounts registered at listing and purchase; anyone can trigger them.
 * The component has no owner. Nobody can change its rules after creation.
@@ -59,7 +64,8 @@ secret public.
 
 * `src/lib.rs`: the template. Group arithmetic and hashing through the engine's intrinsics
   (`tari_template_lib` 0.34).
-* `core/`: `crypt_core`, the client side (sealing, opening, both proofs) in `curve25519-dalek` + `sha2`.
+* `core/`: `crypt_core`, the client side (sealing, opening, the action proofs and the DLEQ proof) in
+  `curve25519-dalek` + `sha2`.
 * `tests/end_to_end.rs`: every way a sale can end, balances checked down to the accounts.
 * `tests/attacks.rs`: the attack battery, including a hostile template (`tests/templates/evil`) and a
   scan of everything the ledger shows. The client code produces every input: if the client and the

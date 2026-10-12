@@ -548,7 +548,7 @@ mod crypt {
             self.escrow.balance()
         }
 
-        /// The sale's context, bound into every proof, key tweak and keystream: this component's address.
+        /// The sale's context, bound into every proof and keystream: this component's address.
         fn context() -> Vec<u8> {
             CallerContext::current_component_address().as_bytes().to_vec()
         }
