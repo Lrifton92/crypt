@@ -1,27 +1,31 @@
 // Copyright 2026 Soufian J (OG Boy)
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! # crypt_core
+//! # `crypt_core`
 //!
 //! Everything the parties of a Crypt sale compute off-chain, written so that every byte the template
 //! re-derives on-chain is derived here the same way:
 //!
 //! * the seller fills a fixed-size **plaintext block** (random salt, length, secret, zero padding)
 //!   and publishes `commitment_of(block)` when listing;
-//! * once paid, the seller **seals** the block to the buyer's key: an ephemeral `R = r·G`, a shared
-//!   point `S = r·B`, and a keystream derived from `S` and the sale's context;
-//! * the buyer **opens** it with `S = b·R`;
+//! * the buyer derives a **sale key** `b' = H(b, sale)` from a base secret, and registers `B' = b'·G`;
+//! * once paid, the seller **seals** the block to `B'`: an ephemeral `R = r·G` with a proof that they
+//!   know `r`, a shared point `S = r·B'`, and a keystream derived from `S` and the sale's context;
+//! * the buyer **opens** it with `S = b'·R`;
 //! * if the block does not match the commitment, the buyer publishes `S` with a **DLEQ proof** that
-//!   `S` really is `b·R`. The template re-derives the keystream, decrypts, re-hashes and settles;
-//! * every other action (buy, deliver, accept, cancel) carries a Schnorr proof by the acting side's
-//!   sale key over the action and its arguments. Nothing is authorized by the transaction signer, so
-//!   a hostile component called in the same transaction cannot act for either side.
+//!   `S = b'·R`. The template re-derives the keystream, decrypts, re-hashes and settles;
+//! * buy, deliver, accept and cancel carry a Schnorr proof by the acting side's key (the buyer's sale
+//!   key, the seller's key) over the action and its arguments. Nothing is authorized by the
+//!   transaction signer, so a hostile component called in the same transaction cannot act for either
+//!   side.
 //!
-//! The buyer's key is **tweaked per sale**: `B_sale = B + H(context, B)·G`. Even a buyer who reuses
-//! `B` gets an unrelated key in every sale, so a dispute in one sale can never decrypt another.
+//! Why the proof of `r`: a dispute publishes `b'·R`. If a seller could post an `R` whose discrete log
+//! they do not know (say, another sale's `R`), the dispute would hand them `b'·R`, a value they could
+//! not compute, and possibly another sale's secret. Requiring proof of `r` means a dispute only ever
+//! publishes `r·B'`, which the seller already knew.
 //!
 //! The template uses the engine's intrinsics; this crate uses `curve25519-dalek` and `sha2`. The
-//! end-to-end test feeds the output of this crate to the template, so any drift between the two
+//! end-to-end tests feed the output of this crate to the template, so any drift between the two
 //! implementations fails CI instead of failing a sale.
 
 use curve25519_dalek::{
@@ -45,31 +49,41 @@ const LEN_PREFIX: usize = 2;
 pub const MAX_SECRET_LEN: usize = PLAINTEXT_LEN - SALT_LEN - LEN_PREFIX;
 
 // Domain separators. Each hash in the protocol has its own, so no output of one can be replayed as
-// the input of another. They must stay byte-for-byte identical to the ones in the template.
+// the input of another. All but DOMAIN_SALE_KEY must stay byte-for-byte identical to the template's.
 pub const DOMAIN_COMMIT: &[u8] = b"tari.ootle.crypt.commitment.v1";
 pub const DOMAIN_KEY: &[u8] = b"tari.ootle.crypt.key.v1";
 pub const DOMAIN_STREAM: &[u8] = b"tari.ootle.crypt.stream.v1";
 pub const DOMAIN_DLEQ: &[u8] = b"tari.ootle.crypt.dleq.v1";
 pub const DOMAIN_AUTH: &[u8] = b"tari.ootle.crypt.auth.v1";
-pub const DOMAIN_TWEAK: &[u8] = b"tari.ootle.crypt.tweak.v1";
+/// Client-only: derivation of a buyer's sale key from their base secret.
+pub const DOMAIN_SALE_KEY: &[u8] = b"tari.ootle.crypt.sale-key.v1";
 
 // The keystream is whole SHA-512 blocks indexed by a single byte.
 const _: () = assert!(PLAINTEXT_LEN.is_multiple_of(64) && PLAINTEXT_LEN / 64 <= 256);
 
 /// Action messages. Each proof signs one of these, length-prefixed inside the challenge, so a proof
 /// for one action never verifies as another.
-pub const MSG_ACCEPT: &[u8] = b"accept";
 pub const MSG_CANCEL: &[u8] = b"cancel";
+/// Signed by the ephemeral key `R` itself: proves the seller knows `r`.
+pub const MSG_EPHEMERAL: &[u8] = b"ephemeral";
 
 /// `buy` binds the account the buyer will be paid into, so a copied proof cannot be reused by
 /// someone else to take the purchase.
+#[must_use]
 pub fn msg_buy(buyer_payout: &[u8]) -> Vec<u8> {
     [b"buy".as_slice(), buyer_payout].concat()
 }
 
 /// `deliver` binds `R` and the ciphertext, so only the seller's key can put a delivery on the ledger.
+#[must_use]
 pub fn msg_deliver(ephemeral: &[u8; 32], ciphertext: &[u8]) -> Vec<u8> {
     [b"deliver".as_slice(), ephemeral, ciphertext].concat()
+}
+
+/// `accept` binds the delivery being accepted.
+#[must_use]
+pub fn msg_accept(ephemeral: &[u8; 32]) -> Vec<u8> {
+    [b"accept".as_slice(), ephemeral].concat()
 }
 
 pub type Block = [u8; PLAINTEXT_LEN];
@@ -85,6 +99,9 @@ pub enum Error {
     MalformedPlaintext,
     /// Opened, but it does not hash to the listed commitment: grounds for a dispute.
     CommitmentMismatch,
+    /// The key used is not the buyer key registered on-chain for this sale. A dispute made with it
+    /// would be refused and would still publish a shared point.
+    WrongKey,
 }
 
 /// A two-scalar Schnorr-style proof `(c, z)`, in the compact form the template verifies.
@@ -94,16 +111,17 @@ pub struct Proof {
     pub z: [u8; 32],
 }
 
-/// What the seller hands to `deliver`.
+/// What the seller hands to `deliver`, minus the seller's own authorization proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sealed {
     pub ephemeral: [u8; 32],
+    /// Proof of knowledge of `r`, bound to the sale.
+    pub ephemeral_proof: Proof,
     pub ciphertext: Block,
 }
 
-/// A party's key. The seller's signs deliveries and cancellation. The buyer's base key is never used
-/// directly: `for_sale` derives the key a given sale actually uses. Generating a fresh base key per
-/// purchase is still better, it keeps purchases unlinkable on-chain.
+/// A secret key. The seller uses one directly; a buyer keeps a base key and uses
+/// `for_sale` to get the key of each purchase.
 pub struct Keypair {
     secret: Scalar,
     public: [u8; 32],
@@ -120,6 +138,7 @@ impl Keypair {
     }
 
     /// Restores a key from its 32 secret bytes. `None` unless the bytes are a canonical, non-zero scalar.
+    #[must_use]
     pub fn from_secret_bytes(bytes: &[u8; 32]) -> Option<Self> {
         let secret: Option<Scalar> = Scalar::from_canonical_bytes(*bytes).into();
         secret.filter(|s| *s != Scalar::ZERO).map(Self::from_scalar)
@@ -136,25 +155,32 @@ impl Keypair {
     }
 
     /// The secret, wiped from memory when the returned value is dropped.
+    #[must_use]
     pub fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.secret.to_bytes())
     }
 
-    /// The key this base key becomes in the sale identified by `context`: `b + H(context, B)`.
+    /// The key this base key becomes in the sale identified by `context`: `b' = H(b, context)`.
+    /// A hash, not an offset: sale keys of one base key have no algebraic relation an observer could
+    /// use, and the base key itself never appears on-chain.
     #[must_use]
     pub fn for_sale(&self, context: &[u8]) -> Self {
-        Self::from_scalar(self.secret + tweak(context, &self.public))
+        let mut secret = self.secret.to_bytes();
+        let wide = sha512_parts(&[
+            &len_prefix(DOMAIN_SALE_KEY),
+            DOMAIN_SALE_KEY,
+            &secret,
+            &len_prefix(context),
+            context,
+        ]);
+        secret.zeroize();
+        let derived = Scalar::from_bytes_mod_order_wide(&wide);
+        // A zero scalar is a 2^-252 event; deriving again under a marker keeps the function total.
+        if derived == Scalar::ZERO {
+            return self.for_sale(&[context, b"\x00"].concat());
+        }
+        Self::from_scalar(derived)
     }
-}
-
-fn tweak(context: &[u8], public: &[u8; 32]) -> Scalar {
-    challenge(DOMAIN_TWEAK, context, &[], &[public])
-}
-
-/// Public side of `Keypair::for_sale`: `B + H(context, B)·G`. The template computes the same at `buy`.
-pub fn sale_key(base_public: &[u8; 32], context: &[u8]) -> Result<[u8; 32], Error> {
-    let b = decode_point(base_public)?;
-    Ok((b + tweak(context, base_public) * G).compress().to_bytes())
 }
 
 impl Drop for Keypair {
@@ -176,6 +202,9 @@ fn sha512_parts(parts: &[&[u8]]) -> [u8; 64] {
 }
 
 /// Decodes an untrusted point: canonical encoding, and never the identity.
+///
+/// # Errors
+/// `InvalidPoint` for a non-canonical encoding, `IdentityPoint` for the identity.
 pub fn decode_point(bytes: &[u8; 32]) -> Result<RistrettoPoint, Error> {
     let point = CompressedRistretto(*bytes).decompress().ok_or(Error::InvalidPoint)?;
     if point == RistrettoPoint::identity() {
@@ -202,6 +231,9 @@ fn challenge(domain: &[u8], context: &[u8], message: &[u8], points: &[&[u8; 32]]
 }
 
 /// Lays out a plaintext block: `salt || len (u16 LE) || secret || zero padding`.
+///
+/// # Errors
+/// `SecretTooLong` past `MAX_SECRET_LEN` bytes.
 pub fn encode_plaintext<R: RngCore + CryptoRng>(secret: &[u8], rng: &mut R) -> Result<Block, Error> {
     if secret.len() > MAX_SECRET_LEN {
         return Err(Error::SecretTooLong);
@@ -215,6 +247,9 @@ pub fn encode_plaintext<R: RngCore + CryptoRng>(secret: &[u8], rng: &mut R) -> R
 }
 
 /// Extracts the secret from an opened block, refusing any block `encode_plaintext` could not have made.
+///
+/// # Errors
+/// `MalformedPlaintext` if the length field or the padding is off.
 pub fn decode_plaintext(block: &Block) -> Result<Vec<u8>, Error> {
     let len = u16::from_le_bytes([block[SALT_LEN], block[SALT_LEN + 1]]) as usize;
     if len > MAX_SECRET_LEN {
@@ -247,8 +282,8 @@ pub fn keystream(context: &[u8], buyer_key: &[u8; 32], ephemeral: &[u8; 32], sha
         shared,
     ]);
     let mut stream = [0u8; PLAINTEXT_LEN];
-    for (i, chunk) in stream.chunks_mut(64).enumerate() {
-        let block = sha512_parts(&[&len_prefix(DOMAIN_STREAM), DOMAIN_STREAM, &key, &[i as u8]]);
+    for (i, chunk) in (0u8..).zip(stream.chunks_mut(64)) {
+        let block = sha512_parts(&[&len_prefix(DOMAIN_STREAM), DOMAIN_STREAM, &key, &[i]]);
         chunk.copy_from_slice(&block[..chunk.len()]);
     }
     stream
@@ -256,13 +291,35 @@ pub fn keystream(context: &[u8], buyer_key: &[u8; 32], ephemeral: &[u8; 32], sha
 
 fn xor(a: &Block, b: &Block) -> Block {
     let mut out = [0u8; PLAINTEXT_LEN];
-    for i in 0..PLAINTEXT_LEN {
-        out[i] = a[i] ^ b[i];
+    for ((o, x), y) in out.iter_mut().zip(a).zip(b) {
+        *o = x ^ y;
     }
     out
 }
 
-/// Seller side: encrypts `block` to `buyer_key` for the sale identified by `context`.
+fn schnorr<R: RngCore + CryptoRng>(
+    secret: &Scalar,
+    public: &[u8; 32],
+    context: &[u8],
+    message: &[u8],
+    rng: &mut R,
+) -> Proof {
+    let mut w = Scalar::random(rng);
+    let a = (w * G).compress().to_bytes();
+    let c = challenge(DOMAIN_AUTH, context, message, &[public, &a]);
+    let z = w + c * secret;
+    w.zeroize();
+    Proof {
+        c: c.to_bytes(),
+        z: z.to_bytes(),
+    }
+}
+
+/// Seller side: encrypts `block` to the buyer's sale key for the sale identified by `context`, and
+/// proves knowledge of the ephemeral secret.
+///
+/// # Errors
+/// `InvalidPoint` / `IdentityPoint` if `buyer_key` is not a usable key.
 pub fn seal<R: RngCore + CryptoRng>(
     block: &Block,
     buyer_key: &[u8; 32],
@@ -273,28 +330,39 @@ pub fn seal<R: RngCore + CryptoRng>(
     let mut r = Scalar::random(rng);
     let ephemeral = (r * G).compress().to_bytes();
     let shared = (r * buyer_point).compress().to_bytes();
+    let ephemeral_proof = schnorr(&r, &ephemeral, context, MSG_EPHEMERAL, rng);
     r.zeroize();
     let ciphertext = xor(block, &keystream(context, buyer_key, &ephemeral, &shared));
-    Ok(Sealed { ephemeral, ciphertext })
+    Ok(Sealed {
+        ephemeral,
+        ephemeral_proof,
+        ciphertext,
+    })
 }
 
-/// Buyer side: `S = b·R`.
-pub fn shared_point(keypair: &Keypair, ephemeral: &[u8; 32]) -> Result<[u8; 32], Error> {
-    Ok((keypair.secret * decode_point(ephemeral)?).compress().to_bytes())
+/// Buyer side: `S = b'·R`.
+///
+/// # Errors
+/// `InvalidPoint` / `IdentityPoint` if `ephemeral` is not a usable point.
+pub fn shared_point(sale_key: &Keypair, ephemeral: &[u8; 32]) -> Result<[u8; 32], Error> {
+    Ok((sale_key.secret * decode_point(ephemeral)?).compress().to_bytes())
 }
 
 /// Buyer side: decrypts a delivery and returns the secret only if it is exactly what was listed.
 /// `CommitmentMismatch` or `MalformedPlaintext` means: dispute, do not accept. Dispute well before the
 /// deadline: the dispute transaction publishes `S`, and if it lands after the deadline the secret is
 /// public without a verdict.
+///
+/// # Errors
+/// As `open`, plus `CommitmentMismatch` and `MalformedPlaintext`.
 pub fn open_verified(
-    keypair: &Keypair,
+    sale_key: &Keypair,
     context: &[u8],
     ephemeral: &[u8; 32],
     ciphertext: &Block,
     commitment: &[u8; 64],
 ) -> Result<Vec<u8>, Error> {
-    let block = open(keypair, context, ephemeral, ciphertext)?;
+    let block = open(sale_key, context, ephemeral, ciphertext)?;
     if commitment_of(&block) != *commitment {
         return Err(Error::CommitmentMismatch);
     }
@@ -302,26 +370,22 @@ pub fn open_verified(
 }
 
 /// Buyer side: decrypts a delivery without checking it. Prefer `open_verified`.
-pub fn open(keypair: &Keypair, context: &[u8], ephemeral: &[u8; 32], ciphertext: &Block) -> Result<Block, Error> {
-    let shared = shared_point(keypair, ephemeral)?;
+///
+/// # Errors
+/// `InvalidPoint` / `IdentityPoint` if `ephemeral` is not a usable point.
+pub fn open(sale_key: &Keypair, context: &[u8], ephemeral: &[u8; 32], ciphertext: &Block) -> Result<Block, Error> {
+    let shared = shared_point(sale_key, ephemeral)?;
     Ok(xor(
         ciphertext,
-        &keystream(context, &keypair.public, ephemeral, &shared),
+        &keystream(context, &sale_key.public, ephemeral, &shared),
     ))
 }
 
-/// Schnorr proof by `keypair` over `message`, bound to the sale. Authorizes buy, deliver, accept and
-/// cancel; at `buy` it doubles as proof that the buyer holds the key they register.
+/// Schnorr proof by `keypair` over `message`, bound to the sale. Authorizes buy (by the buyer's sale
+/// key, which doubles as proof the buyer holds it), deliver and cancel (seller key), accept (sale key).
+#[must_use]
 pub fn prove_action<R: RngCore + CryptoRng>(keypair: &Keypair, context: &[u8], message: &[u8], rng: &mut R) -> Proof {
-    let mut w = Scalar::random(rng);
-    let a = (w * G).compress().to_bytes();
-    let c = challenge(DOMAIN_AUTH, context, message, &[&keypair.public, &a]);
-    let z = w + c * keypair.secret;
-    w.zeroize();
-    Proof {
-        c: c.to_bytes(),
-        z: z.to_bytes(),
-    }
+    schnorr(&keypair.secret, &keypair.public, context, message, rng)
 }
 
 /// Mirror of the template's check, for tests and for clients that want to pre-flight a transaction.
@@ -335,15 +399,26 @@ pub fn verify_action(public: &[u8; 32], context: &[u8], message: &[u8], proof: &
     challenge(DOMAIN_AUTH, context, message, &[public, &a]) == c
 }
 
-/// Dispute side: reveals `S` with a Chaum-Pedersen proof that `log_G(B) = log_R(S)`.
+/// Dispute side: reveals `S` with a Chaum-Pedersen proof that `log_G(B') = log_R(S)`.
+///
+/// `registered_key` is the buyer key read from the ledger. The proof is only produced if `sale_key`
+/// is that key and the result verifies locally: a dispute with the wrong key would be refused on-chain
+/// but would still have published a shared point.
+///
+/// # Errors
+/// `WrongKey` if `sale_key` is not the registered key; point errors as `shared_point`.
 pub fn prove_shared<R: RngCore + CryptoRng>(
-    keypair: &Keypair,
+    sale_key: &Keypair,
+    registered_key: &[u8; 32],
     context: &[u8],
     ephemeral: &[u8; 32],
     rng: &mut R,
 ) -> Result<([u8; 32], Proof), Error> {
+    if sale_key.public != *registered_key {
+        return Err(Error::WrongKey);
+    }
     let r_point = decode_point(ephemeral)?;
-    let shared = (keypair.secret * r_point).compress().to_bytes();
+    let shared = (sale_key.secret * r_point).compress().to_bytes();
     let mut w = Scalar::random(rng);
     let a1 = (w * G).compress().to_bytes();
     let a2 = (w * r_point).compress().to_bytes();
@@ -351,17 +426,18 @@ pub fn prove_shared<R: RngCore + CryptoRng>(
         DOMAIN_DLEQ,
         context,
         &[],
-        &[&keypair.public, ephemeral, &shared, &a1, &a2],
+        &[&sale_key.public, ephemeral, &shared, &a1, &a2],
     );
-    let z = w + c * keypair.secret;
+    let z = w + c * sale_key.secret;
     w.zeroize();
-    Ok((
-        shared,
-        Proof {
-            c: c.to_bytes(),
-            z: z.to_bytes(),
-        },
-    ))
+    let proof = Proof {
+        c: c.to_bytes(),
+        z: z.to_bytes(),
+    };
+    if !verify_shared(registered_key, ephemeral, &shared, context, &proof) {
+        return Err(Error::WrongKey);
+    }
+    Ok((shared, proof))
 }
 
 /// Mirror of the template's DLEQ check.
@@ -396,10 +472,9 @@ mod tests {
 
     const CTX: &[u8] = b"component_0123456789abcdef";
     const OTHER_CTX: &[u8] = b"component_fedcba9876543210";
-    const SECRET_FOR_TESTS: &[u8] = b"secret";
 
     fn sale(secret: &[u8]) -> (Keypair, Block, Sealed) {
-        let buyer = Keypair::generate(&mut OsRng);
+        let buyer = Keypair::generate(&mut OsRng).for_sale(CTX);
         let block = encode_plaintext(secret, &mut OsRng).unwrap();
         let sealed = seal(&block, &buyer.public(), CTX, &mut OsRng).unwrap();
         (buyer, block, sealed)
@@ -451,27 +526,33 @@ mod tests {
         assert_eq!(decode_plaintext(&block), Err(Error::MalformedPlaintext));
 
         let mut block = encode_plaintext(b"abc", &mut OsRng).unwrap();
-        block[SALT_LEN..SALT_LEN + 2].copy_from_slice(&(MAX_SECRET_LEN as u16 + 1).to_le_bytes());
+        let too_long = u16::try_from(MAX_SECRET_LEN + 1).unwrap();
+        block[SALT_LEN..SALT_LEN + 2].copy_from_slice(&too_long.to_le_bytes());
         assert_eq!(decode_plaintext(&block), Err(Error::MalformedPlaintext));
     }
 
     #[test]
     fn action_proofs_verify_only_for_their_key_sale_and_action() {
         let kp = Keypair::generate(&mut OsRng);
-        let proof = prove_action(&kp, CTX, MSG_ACCEPT, &mut OsRng);
-        assert!(verify_action(&kp.public(), CTX, MSG_ACCEPT, &proof));
+        let r = [7u8; 32];
+        let proof = prove_action(&kp, CTX, &msg_accept(&r), &mut OsRng);
+        assert!(verify_action(&kp.public(), CTX, &msg_accept(&r), &proof));
         assert!(
-            !verify_action(&kp.public(), OTHER_CTX, MSG_ACCEPT, &proof),
+            !verify_action(&kp.public(), OTHER_CTX, &msg_accept(&r), &proof),
             "replayed into another sale"
         );
         assert!(
             !verify_action(&kp.public(), CTX, MSG_CANCEL, &proof),
             "replayed as another action"
         );
+        assert!(
+            !verify_action(&kp.public(), CTX, &msg_accept(&[8u8; 32]), &proof),
+            "for another delivery"
+        );
         let other = Keypair::generate(&mut OsRng);
         assert!(
-            !verify_action(&other.public(), CTX, MSG_ACCEPT, &proof),
-            "claimed for someone else's key"
+            !verify_action(&other.public(), CTX, &msg_accept(&r), &proof),
+            "claimed for another key"
         );
         let buy = prove_action(&kp, CTX, &msg_buy(b"account-1"), &mut OsRng);
         assert!(
@@ -481,28 +562,35 @@ mod tests {
     }
 
     #[test]
-    fn the_sale_key_differs_per_sale_and_matches_its_public_side() {
+    fn a_sealed_delivery_proves_knowledge_of_r_for_its_sale_only() {
+        let (_, _, sealed) = sale(b"secret");
+        assert!(verify_action(
+            &sealed.ephemeral,
+            CTX,
+            MSG_EPHEMERAL,
+            &sealed.ephemeral_proof
+        ));
+        assert!(!verify_action(
+            &sealed.ephemeral,
+            OTHER_CTX,
+            MSG_EPHEMERAL,
+            &sealed.ephemeral_proof
+        ));
+    }
+
+    #[test]
+    fn sale_keys_are_unrelated_hashes_of_the_base_key() {
         let base = Keypair::generate(&mut OsRng);
         let a = base.for_sale(CTX);
         let b = base.for_sale(OTHER_CTX);
         assert_ne!(a.public(), b.public());
         assert_ne!(a.public(), base.public());
-        assert_eq!(sale_key(&base.public(), CTX).unwrap(), a.public());
-    }
-
-    #[test]
-    fn a_reused_base_key_still_gives_unrelated_shared_points() {
-        // The attack a per-sale key exists to stop: a seller reposting R from sale A in sale B to make
-        // the buyer's dispute in B reveal S_A.
-        let base = Keypair::generate(&mut OsRng);
-        let block = encode_plaintext(SECRET_FOR_TESTS, &mut OsRng).unwrap();
-        let in_a = base.for_sale(CTX);
-        let sealed_a = seal(&block, &in_a.public(), CTX, &mut OsRng).unwrap();
-        let in_b = base.for_sale(OTHER_CTX);
-        assert_ne!(
-            shared_point(&in_a, &sealed_a.ephemeral).unwrap(),
-            shared_point(&in_b, &sealed_a.ephemeral).unwrap()
+        assert_eq!(
+            base.for_sale(CTX).public(),
+            a.public(),
+            "deterministic, so the buyer can recover it"
         );
+        assert_ne!(a.secret_bytes(), base.secret_bytes());
     }
 
     #[test]
@@ -523,7 +611,7 @@ mod tests {
     #[test]
     fn dleq_proof_verifies_only_for_the_true_shared_point() {
         let (buyer, _, sealed) = sale(b"secret");
-        let (shared, proof) = prove_shared(&buyer, CTX, &sealed.ephemeral, &mut OsRng).unwrap();
+        let (shared, proof) = prove_shared(&buyer, &buyer.public(), CTX, &sealed.ephemeral, &mut OsRng).unwrap();
         assert!(verify_shared(&buyer.public(), &sealed.ephemeral, &shared, CTX, &proof));
         assert!(!verify_shared(
             &buyer.public(),
@@ -533,7 +621,6 @@ mod tests {
             &proof
         ));
 
-        // A buyer who lies about S to fake a fraud must fail.
         let liar = (Scalar::from(7u64) * G).compress().to_bytes();
         assert!(!verify_shared(&buyer.public(), &sealed.ephemeral, &liar, CTX, &proof));
 
@@ -543,11 +630,21 @@ mod tests {
     }
 
     #[test]
+    fn a_dispute_is_never_produced_with_the_wrong_key() {
+        let (buyer, _, sealed) = sale(b"secret");
+        let base = Keypair::generate(&mut OsRng);
+        assert_eq!(
+            prove_shared(&base, &buyer.public(), CTX, &sealed.ephemeral, &mut OsRng).unwrap_err(),
+            Error::WrongKey
+        );
+    }
+
+    #[test]
     fn non_canonical_scalars_are_rejected() {
         let kp = Keypair::generate(&mut OsRng);
-        let mut proof = prove_action(&kp, CTX, MSG_ACCEPT, &mut OsRng);
+        let mut proof = prove_action(&kp, CTX, MSG_CANCEL, &mut OsRng);
         proof.z = [0xff; 32];
-        assert!(!verify_action(&kp.public(), CTX, MSG_ACCEPT, &proof));
+        assert!(!verify_action(&kp.public(), CTX, MSG_CANCEL, &proof));
     }
 
     #[test]

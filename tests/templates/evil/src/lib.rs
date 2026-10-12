@@ -34,7 +34,7 @@ mod evil {
 
         pub fn force_deliver(crypt: ComponentAddress, ephemeral: RistrettoPublicKeyBytes) {
             let noise = Bytes::from_vec(vec![0x66; 320]);
-            ComponentManager::get(crypt).invoke("deliver", args![ephemeral, noise, zero(), zero()]);
+            ComponentManager::get(crypt).invoke("deliver", args![ephemeral, zero(), zero(), noise, zero(), zero()]);
         }
 
         /// Triggers a payout from inside a hostile call. The funds must still land in the registered

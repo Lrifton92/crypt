@@ -168,7 +168,7 @@ impl Market {
         &self,
         payer: &Party,
         crypt: ComponentAddress,
-        base: [u8; 32],
+        buyer_key: [u8; 32],
         payout: ComponentAddress,
         proof: Proof,
         amount: u64,
@@ -181,7 +181,7 @@ impl Market {
                 crypt,
                 "buy",
                 args![
-                    point(base),
+                    point(buyer_key),
                     payout,
                     scalar(proof.c),
                     scalar(proof.z),
@@ -204,7 +204,7 @@ impl Market {
         let tx = self.buy_tx(
             &self.buyer.clone(),
             crypt,
-            base.public(),
+            sale_key.public(),
             self.buyer.account,
             proof,
             PRICE + BUYER_BOND,
@@ -249,21 +249,45 @@ impl Market {
         );
         args![
             point(sealed.ephemeral),
+            scalar(sealed.ephemeral_proof.c),
+            scalar(sealed.ephemeral_proof.z),
             Bytes::from_vec(sealed.ciphertext.to_vec()),
             scalar(proof.c),
             scalar(proof.z)
         ]
     }
 
+    /// Bytes nobody can decrypt, delivered by a seller who does know `r` (so the template accepts the
+    /// delivery itself): what a cheating seller who simply sends noise would post.
+    pub fn noise(crypt: ComponentAddress) -> client::Sealed {
+        let r = Keypair::generate(&mut OsRng);
+        let mut ciphertext = [0u8; client::PLAINTEXT_LEN];
+        rand_core::RngCore::fill_bytes(&mut OsRng, &mut ciphertext);
+        client::Sealed {
+            ephemeral: r.public(),
+            ephemeral_proof: client::prove_action(&r, &context(crypt), client::MSG_EPHEMERAL, &mut OsRng),
+            ciphertext,
+        }
+    }
+
     pub fn deliver_args(&self, crypt: ComponentAddress, sealed: &client::Sealed) -> Vec<NamedArg> {
         Self::deliver_args_signed_by(&self.seller_key, crypt, sealed)
     }
 
-    pub fn accept_args(&self, sale: &Sale) -> Vec<NamedArg> {
+    /// The `R` of the delivery on the ledger.
+    pub fn delivered_ephemeral(&mut self, crypt: ComponentAddress) -> [u8; 32] {
+        let delivery: Option<(RistrettoPublicKeyBytes, Bytes)> =
+            self.test.call_method(crypt, "delivery", args![], vec![]);
+        delivery.expect("delivered").0.into_array()
+    }
+
+    /// The honest buyer's acceptance of the delivery currently on the ledger.
+    pub fn accept_args(&mut self, sale: &Sale) -> Vec<NamedArg> {
+        let ephemeral = self.delivered_ephemeral(sale.crypt);
         proof_args(client::prove_action(
             &sale.buyer_key,
             &context(sale.crypt),
-            client::MSG_ACCEPT,
+            &client::msg_accept(&ephemeral),
             &mut OsRng,
         ))
     }
@@ -278,8 +302,15 @@ impl Market {
     }
 
     pub fn dispute_args(&self, sale: &Sale, ephemeral: &[u8; 32]) -> Vec<NamedArg> {
-        let (shared, proof) =
-            client::prove_shared(&sale.buyer_key, &context(sale.crypt), ephemeral, &mut OsRng).unwrap();
+        let registered = sale.buyer_key.public();
+        let (shared, proof) = client::prove_shared(
+            &sale.buyer_key,
+            &registered,
+            &context(sale.crypt),
+            ephemeral,
+            &mut OsRng,
+        )
+        .unwrap();
         dispute_args(shared, proof)
     }
 
@@ -337,4 +368,10 @@ impl Market {
         self.ok(&seller, sale.crypt, "deliver", args);
         (sale, sealed)
     }
+}
+
+/// A DLEQ proof made by `key` for itself, with none of the honest client's checks against the
+/// registered buyer key: what a hostile client would submit.
+pub fn forged_dispute(key: &Keypair, crypt: ComponentAddress, ephemeral: &[u8; 32]) -> ([u8; 32], Proof) {
+    client::prove_shared(key, &key.public(), &context(crypt), ephemeral, &mut OsRng).unwrap()
 }

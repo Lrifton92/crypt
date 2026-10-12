@@ -1,0 +1,12 @@
+# RustSec warnings triaged on 2026-10-12. None of these crates ends up in the template (wasm) or in
+# crypt_core (checked with `cargo tree`): they come from the Ootle engine that the tests simulate the
+# ledger with, and from the build-time metadata generator. Vulnerabilities are not ignored; only these
+# specific "unmaintained" / "unsound" warnings are. Revisit when the Tari crates update.
+[advisories]
+ignore = [
+    "RUSTSEC-2025-0141", # bincode, unmaintained: tari_engine, tests only
+    "RUSTSEC-2024-0436", # paste, unmaintained: wasmer, tests only
+    "RUSTSEC-2026-0173", # proc-macro-error2, unmaintained: tari_template_test_tooling, tests only
+    "RUSTSEC-2026-0186", # memmap2 0.6, unsound: wasmer, tests only
+    "RUSTSEC-2026-0306", # faster-hex 0.9, unsound AVX2 decode: gix-hash in tari_ootle_template_build, build time only
+]

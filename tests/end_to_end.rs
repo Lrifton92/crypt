@@ -22,7 +22,7 @@ fn the_template_and_the_client_hash_a_block_identically() {
 }
 
 #[test]
-fn the_template_derives_the_same_sale_key_as_the_client() {
+fn the_template_registers_the_buyer_sale_key() {
     let mut m = Market::new();
     let sale = m.paid();
     let on_chain: Option<RistrettoPublicKeyBytes> = m.test.call_method(sale.crypt, "buyer_key", args![], vec![]);
