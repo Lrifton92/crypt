@@ -7,40 +7,54 @@
 //! itself. No arbiter, no oracle, no trusted third party.
 //!
 //! 1. `list`: the seller publishes `commitment = H(salt || len || secret || padding)`, a price, a
-//!    bond for each side, and puts their own bond in escrow.
-//! 2. `buy`: the buyer pays price + bond into escrow and registers a fresh encryption key `B`,
-//!    proving they hold its secret.
+//!    bond for each side, a seller key `K` and a payout account, and puts their own bond in escrow.
+//! 2. `buy`: the buyer pays price + bond, registers a base key `B` and a payout account. The template
+//!    derives the sale key `B' = B + H(sale, B)·G`; the buyer proves they hold it.
 //! 3. `deliver`: the seller posts `R = r·G` and the block encrypted under a keystream derived from
-//!    `S = r·B`. Only the buyer can compute `S = b·R`; the ciphertext is public, the secret is not.
-//! 4. The buyer `accept`s, or `dispute`s by publishing `S` with a DLEQ proof that `S = b·R`. The
-//!    template then derives the keystream itself, decrypts, re-hashes and compares:
-//!    * mismatch: the seller delivered something other than what they committed to. The buyer gets
-//!      the price and both bonds back;
+//!    `S = r·B'`, signed with `K`. Only the buyer can compute `S = b'·R`; the ciphertext is public,
+//!    the secret is not.
+//! 4. The buyer `accept`s, or `dispute`s by publishing `S` with a DLEQ proof that `S = b'·R`. The
+//!    template then derives the keystream itself, decrypts, re-hashes, checks the layout and compares:
+//!    * mismatch or undecodable block: the seller delivered something other than what they committed
+//!      to. The buyer gets the price and both bonds;
 //!    * match: the dispute was false. The seller gets the price and both bonds.
 //! 5. Deadlines, in epochs, release the escrow if either side goes quiet.
+//! 6. Payouts go to the accounts registered at `list` and `buy`, never to the caller.
+//!
+//! **Authorization never uses the transaction signer.** Every action carries a proof by the acting
+//! side's sale key, which lives in the Crypt client, not in the wallet. A hostile component called in
+//! the same transaction cannot accept, deliver, cancel or redirect a payout on anyone's behalf. The
+//! component has no owner (`OwnerRule::None`), so nobody can change its rules after creation.
+//!
+//! Only revealed XTM is accepted: a token whose issuer can recall or freeze funds could empty or lock
+//! the escrow.
 //!
 //! What this guarantees: the secret delivered is the secret committed to. What it cannot guarantee:
-//! that the committed secret is worth anything. A dispute makes the secret public, that is the
-//! price of a verdict anyone can re-check. See THREAT_MODEL.md.
-//!
-//! The component has no owner (`OwnerRule::None`): nobody, the seller included, can change its access
-//! rules after creation and lock the buyer out of `dispute`. Authorization is checked inside each
-//! method against the keys that signed `list` and `buy`.
+//! that the committed secret is worth anything. A dispute makes the secret public, that is the price
+//! of a verdict anyone can re-check. See THREAT_MODEL.md.
 
 use tari_template_lib::prelude::*;
 
 /// Size of every plaintext block and every ciphertext. Must match `crypt_core::PLAINTEXT_LEN`.
 pub const PLAINTEXT_LEN: usize = 320;
+const SALT_LEN: usize = 32;
+const MAX_SECRET_LEN: usize = PLAINTEXT_LEN - SALT_LEN - 2;
 /// Longest dispute or delivery window a seller may set, in epochs. Bounds how long funds can be
 /// locked and keeps `now + window` far from overflow.
 pub const MAX_WINDOW: u64 = 10_000;
+
+// The keystream is whole SHA-512 blocks indexed by a single byte.
+const _: () = assert!(PLAINTEXT_LEN.is_multiple_of(64) && PLAINTEXT_LEN / 64 <= 256);
 
 // Must stay byte-for-byte identical to the constants in `crypt_core`.
 const DOMAIN_COMMIT: &[u8] = b"tari.ootle.crypt.commitment.v1";
 const DOMAIN_KEY: &[u8] = b"tari.ootle.crypt.key.v1";
 const DOMAIN_STREAM: &[u8] = b"tari.ootle.crypt.stream.v1";
 const DOMAIN_DLEQ: &[u8] = b"tari.ootle.crypt.dleq.v1";
-const DOMAIN_POP: &[u8] = b"tari.ootle.crypt.pop.v1";
+const DOMAIN_AUTH: &[u8] = b"tari.ootle.crypt.auth.v1";
+const DOMAIN_TWEAK: &[u8] = b"tari.ootle.crypt.tweak.v1";
+const MSG_ACCEPT: &[u8] = b"accept";
+const MSG_CANCEL: &[u8] = b"cancel";
 
 fn len_prefix(data: &[u8]) -> [u8; 8] {
     (data.len() as u64).to_le_bytes()
@@ -50,6 +64,17 @@ fn to_array64(hash: &Hash64) -> [u8; 64] {
     let mut out = [0u8; 64];
     out.copy_from_slice(hash.as_ref());
     out
+}
+
+/// Same layout check as `crypt_core::decode_plaintext`: `salt (32) || len (u16 LE) || secret || zeros`.
+/// Without it a seller could commit to a block no client can decode, deliver it faithfully, and win
+/// the dispute on a matching hash while the buyer holds nothing readable.
+fn is_well_formed(block: &[u8]) -> bool {
+    if block.len() != PLAINTEXT_LEN {
+        return false;
+    }
+    let len = u16::from_le_bytes([block[SALT_LEN], block[SALT_LEN + 1]]) as usize;
+    len <= MAX_SECRET_LEN && block[SALT_LEN + 2 + len..].iter().all(|&b| b == 0)
 }
 
 /// The commitment over a whole plaintext block.
@@ -65,15 +90,23 @@ fn assert_valid_point(point: &RistrettoPublicKeyBytes, what: &str) {
     assert!(!intrinsics::ristretto_is_identity(point), "{} must not be the identity point", what);
 }
 
-fn challenge(domain: &[u8], context: &[u8], points: &[&RistrettoPublicKeyBytes]) -> Scalar32Bytes {
+/// Fiat-Shamir challenge over the domain, the sale's context, an action message and the points.
+fn challenge(domain: &[u8], context: &[u8], message: &[u8], points: &[&RistrettoPublicKeyBytes]) -> Scalar32Bytes {
     let dlen = len_prefix(domain);
     let clen = len_prefix(context);
-    let mut parts: Vec<&[u8]> = vec![&dlen, domain, &clen, context];
+    let mlen = len_prefix(message);
+    let mut parts: Vec<&[u8]> = vec![&dlen, domain, &clen, context, &mlen, message];
     parts.extend(points.iter().map(|p| p.as_bytes()));
     intrinsics::scalar_from_uniform_bytes(&to_array64(&intrinsics::hash_sha512_parts(&parts)))
 }
 
-/// `z·base - c·point`, the commitment a compact Schnorr proof implies.
+/// `B + H(context, B)·G`: the key a base key `B` becomes in this sale.
+fn sale_key(context: &[u8], base: &RistrettoPublicKeyBytes) -> RistrettoPublicKeyBytes {
+    let tweak = challenge(DOMAIN_TWEAK, context, &[], &[base]);
+    intrinsics::ristretto_add(base, &intrinsics::ristretto_mul_base(&tweak))
+}
+
+/// `z·base - c·point`, the nonce commitment a compact Schnorr proof implies.
 fn implied_nonce(
     base: Option<&RistrettoPublicKeyBytes>,
     point: &RistrettoPublicKeyBytes,
@@ -94,14 +127,18 @@ fn assert_canonical_scalars(c: &Scalar32Bytes, z: &Scalar32Bytes) {
     );
 }
 
-/// Proof that the caller knows `b` with `B = b·G`, bound to this sale.
-fn verify_possession(context: &[u8], key: &RistrettoPublicKeyBytes, c: &Scalar32Bytes, z: &Scalar32Bytes) -> bool {
+/// Schnorr proof by `key` over `message`, bound to this sale.
+fn assert_authorized(context: &[u8], key: &RistrettoPublicKeyBytes, message: &[u8], c: &Scalar32Bytes, z: &Scalar32Bytes, who: &str) {
     assert_canonical_scalars(c, z);
     let a = implied_nonce(None, key, c, z);
-    challenge(DOMAIN_POP, context, &[key, &a]) == *c
+    assert!(
+        challenge(DOMAIN_AUTH, context, message, &[key, &a]) == *c,
+        "not authorized: invalid {} proof",
+        who
+    );
 }
 
-/// Chaum-Pedersen proof that `log_G(B) = log_R(S)`, bound to this sale.
+/// Chaum-Pedersen proof that `log_G(B') = log_R(S)`, bound to this sale.
 fn verify_shared(
     context: &[u8],
     key: &RistrettoPublicKeyBytes,
@@ -113,7 +150,7 @@ fn verify_shared(
     assert_canonical_scalars(c, z);
     let a1 = implied_nonce(None, key, c, z);
     let a2 = implied_nonce(Some(ephemeral), shared, c, z);
-    challenge(DOMAIN_DLEQ, context, &[key, ephemeral, shared, &a1, &a2]) == *c
+    challenge(DOMAIN_DLEQ, context, &[], &[key, ephemeral, shared, &a1, &a2]) == *c
 }
 
 fn keystream(
@@ -139,6 +176,16 @@ fn keystream(
     stream
 }
 
+/// Payouts only go to plain built-in accounts: no custom code runs when the escrow pays out, and a
+/// payout address cannot be a component that refuses deposits to hold the other side hostage.
+fn assert_is_account(address: &ComponentAddress, who: &str) {
+    assert!(
+        ComponentManager::get(*address).get_template_address() == BuiltinTemplate::Account.address(),
+        "the {} payout address must be a built-in account",
+        who
+    );
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, minicbor::Encode, minicbor::Decode, minicbor::CborLen)]
 pub enum Stage {
     /// Listed, waiting for a buyer. The seller may cancel.
@@ -150,7 +197,7 @@ pub enum Stage {
     /// Delivered, waiting for the buyer to accept or dispute.
     #[n(2)]
     Delivered,
-    /// Final. Each side withdraws what it is owed.
+    /// Final. Each side's payout can be sent to its account.
     #[n(3)]
     Settled,
 }
@@ -173,7 +220,8 @@ pub enum Outcome {
     /// their bond.
     #[n(4)]
     DisputeRejected,
-    /// The template decrypted the delivery and it did not match. The seller forfeits their bond.
+    /// The template decrypted the delivery and it did not match, or was not a decodable block.
+    /// The seller forfeits their bond.
     #[n(5)]
     Fraud,
 }
@@ -183,11 +231,11 @@ mod crypt {
     use super::*;
 
     pub struct Crypt {
-        /// Key that signed `list`. Only it may deliver, cancel, or claim an uncontested sale.
-        seller: RistrettoPublicKeyBytes,
-        /// Key that signed `buy`. Only it may accept, dispute, or claim an undelivered sale.
-        buyer: Option<RistrettoPublicKeyBytes>,
-        /// The buyer's encryption key `B`, distinct from the signing key and fresh for each purchase.
+        /// Signs deliveries and cancellation. Held by the seller's Crypt client.
+        seller_key: RistrettoPublicKeyBytes,
+        seller_payout: ComponentAddress,
+        buyer_payout: Option<ComponentAddress>,
+        /// The buyer's sale key `B'`, derived from the base key at `buy`.
         buyer_key: Option<RistrettoPublicKeyBytes>,
         commitment: Hash64,
         price: Amount,
@@ -210,42 +258,43 @@ mod crypt {
     }
 
     impl Crypt {
-        /// Lists a secret for sale. `seller_bond` goes into escrow now and is lost to the buyer if
-        /// the seller never delivers or delivers something other than what `commitment` binds.
+        /// Lists a secret for sale. `seller_bond` (revealed XTM) goes into escrow now and is lost to
+        /// the buyer if the seller never delivers or delivers something other than `commitment`.
+        #[allow(clippy::too_many_arguments)]
         pub fn list(
             commitment: Hash64,
             price: Amount,
             buyer_bond: Amount,
             delivery_window: u64,
             dispute_window: u64,
+            seller_key: RistrettoPublicKeyBytes,
+            seller_payout: ComponentAddress,
             seller_bond: Bucket,
         ) -> Component<Self> {
             assert!(price.is_positive(), "price must be positive");
             assert!(buyer_bond.is_positive(), "buyer bond must be positive");
             assert!(
-                seller_bond.amount().is_positive(),
-                "seller bond must be positive and revealed"
-            );
-            assert!(
                 (1..=MAX_WINDOW).contains(&delivery_window) && (1..=MAX_WINDOW).contains(&dispute_window),
                 "windows must be between 1 and {} epochs",
                 MAX_WINDOW
             );
+            // A token whose issuer keeps recall, freeze or an authorization hook could empty or lock
+            // the escrow, and a template cannot read those rules. Native XTM has none of them.
+            assert!(seller_bond.resource_address() == TARI_TOKEN, "only XTM is accepted");
+            // Revealed funds only: a hidden commitment would be counted by nobody and stuck forever.
+            seller_bond.assert_contains_no_confidential_funds();
+            assert!(seller_bond.amount().is_positive(), "seller bond must be positive");
+            assert_valid_point(&seller_key, "seller key");
+            assert_is_account(&seller_payout, "seller");
 
-            // Escrow accounting relies on amounts the template can read. A confidential resource
-            // hides them, a non-fungible one has no meaningful partial amounts.
-            assert!(
-                ResourceManager::get(seller_bond.resource_address()).resource_type() == ResourceType::Fungible,
-                "the payment resource must be a public fungible resource"
-            );
-
-            let escrow = Vault::new_empty(seller_bond.resource_address());
+            let escrow = Vault::new_empty(TARI_TOKEN);
             let bond = seller_bond.amount();
             escrow.deposit(seller_bond);
 
             Component::new(Self {
-                seller: CallerContext::transaction_signer_public_key(),
-                buyer: None,
+                seller_key,
+                seller_payout,
+                buyer_payout: None,
                 buyer_key: None,
                 commitment,
                 price,
@@ -269,54 +318,54 @@ mod crypt {
             .create()
         }
 
-        /// Buys. `payment` must be exactly price + buyer bond, in the listed resource. `buyer_key`
-        /// is the key the secret will be sealed to; `(pop_c, pop_z)` proves the caller holds it.
+        /// Buys. `payment` must be exactly price + buyer bond, in revealed XTM. `(c, z)` is a proof by
+        /// the sale key derived from `base_key`, over `"buy" || buyer_payout`: it shows the buyer holds
+        /// the key, and a copy of it cannot be used to buy into another account.
         pub fn buy(
             &mut self,
-            buyer_key: RistrettoPublicKeyBytes,
-            pop_c: Scalar32Bytes,
-            pop_z: Scalar32Bytes,
+            base_key: RistrettoPublicKeyBytes,
+            buyer_payout: ComponentAddress,
+            c: Scalar32Bytes,
+            z: Scalar32Bytes,
             payment: Bucket,
         ) {
             assert!(self.stage == Stage::Listed, "not for sale");
-            let signer = CallerContext::transaction_signer_public_key();
-            assert!(signer != self.seller, "the seller cannot buy their own listing");
+            assert_valid_point(&base_key, "buyer key");
+            let context = self.context();
+            let key = sale_key(&context, &base_key);
+            assert_valid_point(&key, "buyer sale key");
+            let message = [b"buy".as_slice(), buyer_payout.as_bytes()].concat();
+            assert_authorized(&context, &key, &message, &c, &z, "buyer");
+            assert_is_account(&buyer_payout, "buyer");
 
-            assert_valid_point(&buyer_key, "buyer key");
-            assert!(
-                verify_possession(&self.context(), &buyer_key, &pop_c, &pop_z),
-                "invalid proof of possession of the buyer key"
-            );
-
-            assert!(
-                payment.resource_address() == self.escrow.resource_address(),
-                "wrong payment resource"
-            );
+            assert!(payment.resource_address() == TARI_TOKEN, "only XTM is accepted");
+            payment.assert_contains_no_confidential_funds();
             let due = self.price + self.buyer_bond;
             assert!(payment.amount() == due, "payment must be exactly {}", due);
             self.escrow.deposit(payment);
 
             let now = Consensus::current_epoch();
-            self.buyer = Some(signer);
-            self.buyer_key = Some(buyer_key);
+            self.buyer_key = Some(key);
+            self.buyer_payout = Some(buyer_payout);
             self.delivery_deadline = Some(now + self.delivery_window);
             self.stage = Stage::Paid;
             emit_event("crypt_bought", metadata! { "epoch" => now.to_string() });
         }
 
-        /// Delivers the sealed secret. Allowed up to and including the delivery deadline.
-        pub fn deliver(&mut self, ephemeral: RistrettoPublicKeyBytes, ciphertext: Bytes) {
-            self.assert_signer_is_seller();
+        /// Delivers the sealed secret, signed by the seller key over `"deliver" || R || C`. Allowed up
+        /// to and including the delivery deadline.
+        pub fn deliver(&mut self, ephemeral: RistrettoPublicKeyBytes, ciphertext: Bytes, c: Scalar32Bytes, z: Scalar32Bytes) {
             assert!(self.stage == Stage::Paid, "nothing to deliver");
             let now = Consensus::current_epoch();
             assert!(now <= self.delivery_deadline.unwrap(), "delivery deadline passed");
-
             assert_valid_point(&ephemeral, "ephemeral key");
             assert!(
                 ciphertext.len() == PLAINTEXT_LEN,
                 "ciphertext must be exactly {} bytes",
                 PLAINTEXT_LEN
             );
+            let message = [b"deliver".as_slice(), ephemeral.as_bytes(), &ciphertext].concat();
+            assert_authorized(&self.context(), &self.seller_key, &message, &c, &z, "seller");
 
             self.ephemeral = Some(ephemeral);
             self.ciphertext = Some(ciphertext);
@@ -326,16 +375,16 @@ mod crypt {
         }
 
         /// The buyer is satisfied: the seller gets the price, each side its bond back.
-        pub fn accept(&mut self) {
-            self.assert_signer_is_buyer();
+        pub fn accept(&mut self, c: Scalar32Bytes, z: Scalar32Bytes) {
             assert!(self.stage == Stage::Delivered, "nothing to accept");
+            assert_authorized(&self.context(), &self.buyer_key.unwrap(), MSG_ACCEPT, &c, &z, "buyer");
             self.settle(Outcome::Accepted);
         }
 
-        /// Files a dispute. Allowed up to and including the dispute deadline. Publishes `S`: anyone
+        /// Files a dispute. Allowed up to and including the dispute deadline. The DLEQ proof is the
+        /// authorization: only the holder of the buyer's sale key can produce it. Publishes `S`: anyone
         /// can then decrypt the delivery and re-check the verdict, so the secret becomes public.
         pub fn dispute(&mut self, shared: RistrettoPublicKeyBytes, c: Scalar32Bytes, z: Scalar32Bytes) {
-            self.assert_signer_is_buyer();
             assert!(self.stage == Stage::Delivered, "nothing to dispute");
             assert!(
                 Consensus::current_epoch() <= self.dispute_deadline.unwrap(),
@@ -362,16 +411,18 @@ mod crypt {
                 .collect();
 
             self.shared = Some(shared);
-            if commitment_of(&block) == self.commitment {
+            // The seller wins only by delivering exactly what they committed to, in a form the
+            // buyer's client can decode.
+            if commitment_of(&block) == self.commitment && is_well_formed(&block) {
                 self.settle(Outcome::DisputeRejected);
             } else {
                 self.settle(Outcome::Fraud);
             }
         }
 
-        /// The seller never delivered: the buyer takes back the price, their bond, and the seller's.
+        /// The seller never delivered. Anyone may trigger it once the window is over; the funds can
+        /// only go to the buyer's account.
         pub fn claim_undelivered(&mut self) {
-            self.assert_signer_is_buyer();
             assert!(self.stage == Stage::Paid, "not awaiting delivery");
             assert!(
                 Consensus::current_epoch() > self.delivery_deadline.unwrap(),
@@ -380,9 +431,8 @@ mod crypt {
             self.settle(Outcome::Undelivered);
         }
 
-        /// The buyer never answered the delivery: same split as an acceptance.
+        /// The buyer never answered the delivery: same split as an acceptance. Anyone may trigger it.
         pub fn claim_uncontested(&mut self) {
-            self.assert_signer_is_seller();
             assert!(self.stage == Stage::Delivered, "not awaiting acceptance");
             assert!(
                 Consensus::current_epoch() > self.dispute_deadline.unwrap(),
@@ -391,31 +441,28 @@ mod crypt {
             self.settle(Outcome::Uncontested);
         }
 
-        /// Withdraws the listing before anyone pays.
-        pub fn cancel(&mut self) {
-            self.assert_signer_is_seller();
+        /// Withdraws the listing before anyone pays. Signed by the seller key.
+        pub fn cancel(&mut self, c: Scalar32Bytes, z: Scalar32Bytes) {
             assert!(self.stage == Stage::Listed, "already sold");
+            assert_authorized(&self.context(), &self.seller_key, MSG_CANCEL, &c, &z, "seller");
             self.settle(Outcome::Cancelled);
         }
 
-        /// Pays out whatever the signer is owed. Pull rather than push: a settlement never depends on
-        /// the other side being able to receive.
-        pub fn withdraw(&mut self) -> Bucket {
+        /// Sends the seller's share to the seller's account. Anyone may call it.
+        pub fn pay_seller(&mut self) {
             assert!(self.stage == Stage::Settled, "not settled");
-            let signer = CallerContext::transaction_signer_public_key();
-            let amount = if signer == self.seller {
-                let owed = self.owed_seller;
-                self.owed_seller = Amount::zero();
-                owed
-            } else if Some(signer) == self.buyer {
-                let owed = self.owed_buyer;
-                self.owed_buyer = Amount::zero();
-                owed
-            } else {
-                panic!("only the seller or the buyer can withdraw");
-            };
-            assert!(amount.is_positive(), "nothing owed");
-            self.escrow.withdraw(amount)
+            let amount = self.owed_seller;
+            self.owed_seller = Amount::zero();
+            self.pay(self.seller_payout, amount);
+        }
+
+        /// Sends the buyer's share to the buyer's account. Anyone may call it. Separate from
+        /// `pay_seller`, so a problem on one side can never hold the other side's funds.
+        pub fn pay_buyer(&mut self) {
+            assert!(self.stage == Stage::Settled, "not settled");
+            let amount = self.owed_buyer;
+            self.owed_buyer = Amount::zero();
+            self.pay(self.buyer_payout.expect("no buyer"), amount);
         }
 
         /// The commitment a block must hash to. Exposed so a buyer can check a delivery off-chain.
@@ -445,6 +492,7 @@ mod crypt {
             (self.delivery_deadline, self.dispute_deadline)
         }
 
+        /// The buyer's sale key `B'`: what the seller seals to.
         pub fn buyer_key(&self) -> Option<RistrettoPublicKeyBytes> {
             self.buyer_key
         }
@@ -465,23 +513,15 @@ mod crypt {
             self.escrow.balance()
         }
 
-        /// The sale's context, bound into every proof and keystream: this component's address.
+        /// The sale's context, bound into every proof, key tweak and keystream: this component's address.
         fn context(&self) -> Vec<u8> {
             CallerContext::current_component_address().as_bytes().to_vec()
         }
 
-        fn assert_signer_is_seller(&self) {
-            assert!(
-                CallerContext::transaction_signer_public_key() == self.seller,
-                "only the seller can do this"
-            );
-        }
-
-        fn assert_signer_is_buyer(&self) {
-            assert!(
-                Some(CallerContext::transaction_signer_public_key()) == self.buyer,
-                "only the buyer can do this"
-            );
+        fn pay(&self, account: ComponentAddress, amount: Amount) {
+            assert!(amount.is_positive(), "nothing owed");
+            let funds = self.escrow.withdraw(amount);
+            ComponentManager::get(account).invoke("deposit", args![funds]);
         }
 
         /// The single exit from every non-final stage. Distributes the whole escrow between the two

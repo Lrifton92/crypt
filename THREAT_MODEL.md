@@ -58,7 +58,7 @@ transaction calling `accept` or `withdraw` on the user's behalf is outside what 
 | A sale settles once | Single `settle` exit, stage checked first | `a_settled_sale_stays_settled_and_pays_out_once` |
 | Payouts happen once | Owed amount zeroed before the vault withdraws | same |
 | No funds stuck, none created | `settle` asserts `owed_seller + owed_buyer == escrow` | every settlement test ends at an empty escrow |
-| Amounts readable | Public fungible resource only; overflow panics | `list` |
+| Amounts readable | Fungible or confidential resource, revealed funds only (no hidden commitment enters escrow); overflow panics | `list`, `buy` |
 | Client and template agree byte for byte | Commitment, keystream and proofs computed by both | `the_template_and_the_client_hash_a_block_identically`, every happy path |
 
 ## Limits, stated plainly

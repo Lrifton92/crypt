@@ -32,7 +32,8 @@ jobs:
         run: ls -l target/wasm32-unknown-unknown/release/crypt.wasm
 
   end-to-end:
-    # Every attack in THREAT_MODEL.md, played against a simulated Ootle ledger with the real client.
+    # Every sale outcome (end_to_end.rs) and every attack in THREAT_MODEL.md (attacks.rs), played
+    # against a simulated Ootle ledger with the real client and a hostile template.
     # Linux only: the engine pulls a Cranelift JIT that does not build on Windows.
     runs-on: ubuntu-latest
     steps:
@@ -40,5 +41,7 @@ jobs:
       - name: Install the wasm target
         run: rustup target add wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: Play every sale and every attack
-        run: cargo test -p crypt --test end_to_end -- --nocapture
+      - name: Play every sale
+        run: cargo test -p crypt --test end_to_end
+      - name: Play every attack
+        run: cargo test -p crypt --test attacks

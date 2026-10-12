@@ -1,0 +1,27 @@
+# A hostile template, compiled only by the attack tests. It is what a victim might call in the same
+# transaction as a Crypt action: an "airdrop", a "DEX", anything.
+[workspace]
+
+[package]
+name = "evil"
+version = "0.0.0"
+edition = "2021"
+license = "BSD-3-Clause"
+publish = false
+
+[dependencies]
+tari_template_lib = "0.34.0"
+tari_template_abi = "0.20.1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[build-dependencies]
+tari_ootle_template_build = "0.11"

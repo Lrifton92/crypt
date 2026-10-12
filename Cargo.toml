@@ -1,5 +1,6 @@
 [workspace]
 members = ["core"]
+exclude = ["tests/templates/evil"]
 
 [package]
 name = "crypt"
@@ -39,3 +40,5 @@ crypt_core = { path = "core" }
 rand_core = { version = "0.6", features = ["getrandom"] }
 tari_template_test_tooling = "0.45"
 tari_template_lib_types = "0.34.0"
+curve25519-dalek = { version = "4.1", features = ["rand_core"] }
+minicbor = { version = "2.3", features = ["alloc", "std"] }
