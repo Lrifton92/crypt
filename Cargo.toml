@@ -41,3 +41,4 @@ tari_template_test_tooling = "0.45"
 tari_template_lib_types = "0.34.0"
 curve25519-dalek = { version = "4.1", features = ["rand_core"] }
 minicbor = { version = "2.3", features = ["alloc", "std"] }
+tari_bor = "0.16"

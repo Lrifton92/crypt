@@ -1,8 +1,10 @@
 //! Shared harness for the end-to-end and attack suites.
 //!
-//! Authorization in Crypt is by proofs from the parties' Crypt keys, not by the transaction signer,
-//! so the harness keeps two things per party: a funded wallet account (to pay and be paid) and the
-//! client keys `crypt_core` would hold.
+//! The parties have no accounts. A test "bank" mints stealth coins (what a real participant would
+//! already hold in their wallet); each party funds its side of a sale by spending such a coin in a
+//! transaction signed by the coin's own one-time key, and is paid back into fresh stealth outputs,
+//! which the harness then redeems to prove the payee really controls exactly what it was owed.
+//! Authorization inside the sale comes from the Crypt keys `crypt_core` holds, never from a signer.
 #![allow(dead_code)]
 
 pub use crypt_core::{self as client, Keypair, Proof};
@@ -11,12 +13,17 @@ pub use tari_template_lib_types::{
     bytes::Bytes,
     constants::TARI_TOKEN,
     crypto::{RistrettoPublicKeyBytes, Scalar32Bytes},
+    stealth::StealthTransferStatement,
     Amount, ComponentAddress, Hash64, NonFungibleAddress,
 };
 pub use tari_template_test_tooling::{
-    crypto::RistrettoSecretKey,
+    byte_type::ToByteType,
+    crypto::{PublicKey, RistrettoPublicKey, RistrettoSecretKey},
     engine_types::virtual_substate::{VirtualSubstate, VirtualSubstateId},
-    support::assert_error::assert_reject_reason,
+    support::{
+        assert_error::assert_reject_reason,
+        stealth::{generate_transfer_data, generate_transfer_data_to, StealthSecretTransferData, NO_INPUTS},
+    },
     transaction::{args, builder::named_args::NamedArg, Transaction},
     TemplateTest,
 };
@@ -29,19 +36,47 @@ pub const DISPUTE_WINDOW: u64 = 4;
 pub const START_EPOCH: u64 = 10;
 pub const SECRET: &[u8] = b"vault combination: 31-04-77";
 
+/// The faucet-funded account the test mints coins from. Never part of a sale.
 #[derive(Clone)]
-pub struct Party {
+pub struct Bank {
     pub account: ComponentAddress,
     pub proof: NonFungibleAddress,
     pub key: RistrettoSecretKey,
 }
 
+/// A stealth UTXO a party holds: its value and the secrets (mask, one-time spend key) to spend it.
+pub struct Coin {
+    pub data: StealthSecretTransferData,
+    pub value: u64,
+}
+
+impl Coin {
+    /// The one-time key that authorises spending this coin (key path from the mask).
+    pub fn key(&self) -> &RistrettoSecretKey {
+        &self.data.output_masks[0]
+    }
+
+    pub fn public(&self) -> RistrettoPublicKeyBytes {
+        RistrettoPublicKey::from_secret_key(self.key()).to_byte_type()
+    }
+
+    /// Spends the whole coin into a revealed bucket taken by the coin's own key.
+    pub fn spend_to_bucket(&self) -> StealthTransferStatement {
+        generate_transfer_data_to(
+            [self.data.input_spec_for(0, self.value)],
+            Amount::zero(),
+            Vec::<u64>::new(),
+            Amount::from_u64(self.value),
+            self.public(),
+        )
+        .statement
+    }
+}
+
 pub struct Market {
     pub test: TemplateTest,
-    pub seller: Party,
-    pub buyer: Party,
-    pub stranger: Party,
-    /// The seller's Crypt key (signs deliveries and cancellation).
+    pub bank: Bank,
+    /// The seller's Crypt key (signs deliveries, cancellation, the seller's payout).
     pub seller_key: Keypair,
 }
 
@@ -49,8 +84,31 @@ pub struct Market {
 pub struct Sale {
     pub crypt: ComponentAddress,
     pub block: client::Block,
-    /// The buyer's per-sale key, derived from a base key.
+    /// The buyer's per-sale key.
     pub buyer_key: Keypair,
+}
+
+/// Which side a payout goes to.
+#[derive(Clone, Copy)]
+pub enum Side {
+    Seller,
+    Buyer,
+}
+
+impl Side {
+    pub fn method(self) -> &'static str {
+        match self {
+            Side::Seller => "pay_seller",
+            Side::Buyer => "pay_buyer",
+        }
+    }
+
+    pub fn action(self) -> &'static [u8] {
+        match self {
+            Side::Seller => client::MSG_PAY_SELLER,
+            Side::Buyer => client::MSG_PAY_BUYER,
+        }
+    }
 }
 
 pub fn set_epoch(test: &mut TemplateTest, epoch: u64) {
@@ -81,6 +139,38 @@ pub fn dispute_args(shared: [u8; 32], proof: Proof) -> Vec<NamedArg> {
     args![point(shared), scalar(proof.c), scalar(proof.z)]
 }
 
+/// The digest a payee signs, computed the way the client does it.
+pub fn digest_of(statement: &StealthTransferStatement) -> [u8; 64] {
+    client::statement_digest(&tari_bor::encode(statement).unwrap())
+}
+
+/// A payout statement for `amount`: no stealth inputs, the amount revealed in from the escrow, one
+/// fresh stealth output for the payee.
+pub fn payout_statement(amount: u64) -> StealthSecretTransferData {
+    generate_transfer_data(NO_INPUTS, Amount::from_u64(amount), [amount], Amount::zero())
+}
+
+pub fn payout_args(
+    signer: &Keypair,
+    crypt: ComponentAddress,
+    side: Side,
+    statement: &StealthTransferStatement,
+) -> Vec<NamedArg> {
+    let proof = client::prove_action(
+        signer,
+        &context(crypt),
+        &client::msg_pay(side.action(), &digest_of(statement)),
+        &mut OsRng,
+    );
+    args![statement.clone(), scalar(proof.c), scalar(proof.z)]
+}
+
+/// A DLEQ proof made by `key` for itself, with none of the honest client's checks against the
+/// registered buyer key: what a hostile client would submit.
+pub fn forged_dispute(key: &Keypair, crypt: ComponentAddress, ephemeral: &[u8; 32]) -> ([u8; 32], Proof) {
+    client::prove_shared(key, &key.public(), &context(crypt), ephemeral, &mut OsRng).unwrap()
+}
+
 impl Market {
     pub fn new() -> Self {
         Self::with_templates(&["."])
@@ -89,18 +179,10 @@ impl Market {
     pub fn with_templates(paths: &[&str]) -> Self {
         let mut test = TemplateTest::new_cwd(paths.iter().copied());
         set_epoch(&mut test, START_EPOCH);
-        let party = |test: &mut TemplateTest| {
-            let (account, proof, key) = test.create_funded_account();
-            Party { account, proof, key }
-        };
-        let seller = party(&mut test);
-        let buyer = party(&mut test);
-        let stranger = party(&mut test);
+        let (account, proof, key) = test.create_funded_account();
         Self {
             test,
-            seller,
-            buyer,
-            stranger,
+            bank: Bank { account, proof, key },
             seller_key: Keypair::generate(&mut OsRng),
         }
     }
@@ -109,24 +191,37 @@ impl Market {
         set_epoch(&mut self.test, epoch);
     }
 
+    /// Mints a stealth coin worth `value` out of the bank.
+    pub fn coin(&mut self, value: u64) -> Coin {
+        let data = generate_transfer_data(NO_INPUTS, Amount::from_u64(value), [value], Amount::zero());
+        let bank = self.bank.clone();
+        let tx = self
+            .test
+            .transaction()
+            .call_method(bank.account, "withdraw", args![TARI_TOKEN, Amount::from_u64(value)])
+            .put_last_instruction_output_on_workspace("funds")
+            .stealth_transfer_with_input_bucket(TARI_TOKEN, data.statement.clone(), "funds")
+            .build_and_seal(&bank.key);
+        self.test.execute_expect_success(tx, vec![bank.proof]);
+        Coin { data, value }
+    }
+
+    /// Lists, with the seller's bond paid out of a stealth coin, in a transaction signed by that coin's
+    /// one-time key.
     pub fn list_tx(
-        &self,
+        &mut self,
         commitment: Hash64,
         seller_key: [u8; 32],
-        payout: ComponentAddress,
         bond: u64,
         price: u64,
         buyer_bond: u64,
         windows: (u64, u64),
     ) -> Transaction {
+        let coin = self.coin(bond);
         let template = self.test.get_template_address("Crypt");
         self.test
             .transaction()
-            .call_method(
-                self.seller.account,
-                "withdraw",
-                args![TARI_TOKEN, Amount::from_u64(bond)],
-            )
+            .stealth_transfer(TARI_TOKEN, coin.spend_to_bucket())
             .put_last_instruction_output_on_workspace("bond")
             .call_function(
                 template,
@@ -138,24 +233,22 @@ impl Market {
                     windows.0,
                     windows.1,
                     point(seller_key),
-                    payout,
                     Workspace("bond")
                 ],
             )
-            .build_and_seal(&self.seller.key)
+            .build_and_seal(coin.key())
     }
 
     pub fn list(&mut self, block: &client::Block) -> ComponentAddress {
         let tx = self.list_tx(
             Hash64::from(client::commitment_of(block)),
             self.seller_key.public(),
-            self.seller.account,
             SELLER_BOND,
             PRICE,
             BUYER_BOND,
             (DELIVERY_WINDOW, DISPUTE_WINDOW),
         );
-        let result = self.test.execute_expect_success(tx, vec![self.seller.proof.clone()]);
+        let result = self.test.execute_expect_success(tx, vec![]);
         result
             .finalize
             .execution_results
@@ -164,52 +257,28 @@ impl Market {
             .expect("list returns the component address")
     }
 
-    pub fn buy_tx(
-        &self,
-        payer: &Party,
-        crypt: ComponentAddress,
-        buyer_key: [u8; 32],
-        payout: ComponentAddress,
-        proof: Proof,
-        amount: u64,
-    ) -> Transaction {
+    /// Buys with a stealth coin worth `amount`, in a transaction signed by that coin's one-time key.
+    pub fn buy_tx(&mut self, crypt: ComponentAddress, buyer_key: [u8; 32], proof: Proof, amount: u64) -> Transaction {
+        let coin = self.coin(amount);
         self.test
             .transaction()
-            .call_method(payer.account, "withdraw", args![TARI_TOKEN, Amount::from_u64(amount)])
+            .stealth_transfer(TARI_TOKEN, coin.spend_to_bucket())
             .put_last_instruction_output_on_workspace("payment")
             .call_method(
                 crypt,
                 "buy",
-                args![
-                    point(buyer_key),
-                    payout,
-                    scalar(proof.c),
-                    scalar(proof.z),
-                    Workspace("payment")
-                ],
+                args![point(buyer_key), scalar(proof.c), scalar(proof.z), Workspace("payment")],
             )
-            .build_and_seal(&payer.key)
+            .build_and_seal(coin.key())
     }
 
-    /// The honest buyer's client: derive the sale key, sign "buy || payout", pay exactly.
+    /// The honest buyer's client: derive the sale key from a base key, prove it, pay exactly.
     pub fn buy_with(&mut self, crypt: ComponentAddress, base: &Keypair) -> Keypair {
         let ctx = context(crypt);
         let sale_key = base.for_sale(&ctx);
-        let proof = client::prove_action(
-            &sale_key,
-            &ctx,
-            &client::msg_buy(self.buyer.account.as_bytes()),
-            &mut OsRng,
-        );
-        let tx = self.buy_tx(
-            &self.buyer.clone(),
-            crypt,
-            sale_key.public(),
-            self.buyer.account,
-            proof,
-            PRICE + BUYER_BOND,
-        );
-        self.test.execute_expect_success(tx, vec![self.buyer.proof.clone()]);
+        let proof = client::prove_action(&sale_key, &ctx, client::MSG_BUY, &mut OsRng);
+        let tx = self.buy_tx(crypt, sale_key.public(), proof, PRICE + BUYER_BOND);
+        self.test.execute_expect_success(tx, vec![]);
         sale_key
     }
 
@@ -217,22 +286,22 @@ impl Market {
         self.buy_with(crypt, &Keypair::generate(&mut OsRng))
     }
 
-    /// Any party sends one call; the proofs inside the arguments are what authorize it.
-    pub fn call_tx(&self, who: &Party, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>) -> Transaction {
+    /// One call. Who signs does not matter: the proofs inside the arguments are what authorize it.
+    pub fn call_tx(&self, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>) -> Transaction {
         self.test
             .transaction()
             .call_method(crypt, method, args)
-            .build_and_seal(&who.key)
+            .build_and_seal(self.test.secret_key())
     }
 
-    pub fn ok(&mut self, who: &Party, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>) {
-        let tx = self.call_tx(who, crypt, method, args);
-        self.test.execute_expect_success(tx, vec![who.proof.clone()]);
+    pub fn ok(&mut self, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>) {
+        let tx = self.call_tx(crypt, method, args);
+        self.test.execute_expect_success(tx, vec![]);
     }
 
-    pub fn refused(&mut self, who: &Party, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>, reason: &str) {
-        let tx = self.call_tx(who, crypt, method, args);
-        let rejected = self.test.execute_expect_failure(tx, vec![who.proof.clone()]);
+    pub fn refused(&mut self, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>, reason: &str) {
+        let tx = self.call_tx(crypt, method, args);
+        let rejected = self.test.execute_expect_failure(tx, vec![]);
         assert_reject_reason(rejected, reason);
     }
 
@@ -257,6 +326,10 @@ impl Market {
         ]
     }
 
+    pub fn deliver_args(&self, crypt: ComponentAddress, sealed: &client::Sealed) -> Vec<NamedArg> {
+        Self::deliver_args_signed_by(&self.seller_key, crypt, sealed)
+    }
+
     /// Bytes nobody can decrypt, delivered by a seller who does know `r` (so the template accepts the
     /// delivery itself): what a cheating seller who simply sends noise would post.
     pub fn noise(crypt: ComponentAddress) -> client::Sealed {
@@ -268,10 +341,6 @@ impl Market {
             ephemeral_proof: client::prove_action(&r, &context(crypt), client::MSG_EPHEMERAL, &mut OsRng),
             ciphertext,
         }
-    }
-
-    pub fn deliver_args(&self, crypt: ComponentAddress, sealed: &client::Sealed) -> Vec<NamedArg> {
-        Self::deliver_args_signed_by(&self.seller_key, crypt, sealed)
     }
 
     /// The `R` of the delivery on the ledger.
@@ -330,21 +399,56 @@ impl Market {
         self.test.call_method(crypt, "escrow_balance", args![], vec![])
     }
 
-    pub fn balance(&mut self, account: ComponentAddress) -> Amount {
-        self.test.call_method(account, "balance", args![TARI_TOKEN], vec![])
+    pub fn bank_balance(&mut self) -> Amount {
+        self.test
+            .call_method(self.bank.account, "balance", args![TARI_TOKEN], vec![])
     }
 
-    /// Pays out every side still owed something, triggered by a stranger: payouts need nobody's key.
-    pub fn pay_out(&mut self, crypt: ComponentAddress) {
-        let stranger = self.stranger.clone();
-        let (seller, buyer) = self.owed(crypt);
-        if seller.is_positive() {
-            self.ok(&stranger, crypt, "pay_seller", args![]);
+    /// Pays `side` its share into a fresh stealth output, signed by `signer`, and returns the coin the
+    /// payee now holds.
+    pub fn pay(&mut self, crypt: ComponentAddress, side: Side, signer: &Keypair, amount: u64) -> Coin {
+        let data = payout_statement(amount);
+        let args = payout_args(signer, crypt, side, &data.statement);
+        self.ok(crypt, side.method(), args);
+        Coin { data, value: amount }
+    }
+
+    /// Spends `coin` back into the bank: succeeds only if the holder really controls exactly `value`.
+    pub fn redeem(&mut self, coin: &Coin) {
+        let before = self.bank_balance();
+        let tx = self
+            .test
+            .transaction()
+            .stealth_transfer(TARI_TOKEN, coin.spend_to_bucket())
+            .put_last_instruction_output_on_workspace("redeemed")
+            .call_method(self.bank.account, "deposit", args![Workspace("redeemed")])
+            .build_and_seal(coin.key());
+        self.test.execute_expect_success(tx, vec![]);
+        assert_eq!(
+            self.bank_balance(),
+            before + a(coin.value),
+            "the payee controls exactly what it was owed"
+        );
+    }
+
+    /// Pays out every side still owed something, redeems each payout, and checks the escrow is empty.
+    pub fn pay_out(&mut self, sale: &Sale) {
+        let (seller, buyer) = self.owed(sale.crypt);
+        let seller_key = Keypair::from_secret_bytes(&self.seller_key.secret_bytes()).unwrap();
+        for (owed, side, key) in [
+            (seller, Side::Seller, &seller_key),
+            (buyer, Side::Buyer, &sale.buyer_key),
+        ] {
+            if owed.is_positive() {
+                let coin = self.pay(sale.crypt, side, key, owed.to_u64_checked().unwrap());
+                self.redeem(&coin);
+            }
         }
-        if buyer.is_positive() {
-            self.ok(&stranger, crypt, "pay_buyer", args![]);
-        }
-        assert_eq!(self.escrow(crypt), Amount::zero(), "everything paid out, nothing stuck");
+        assert_eq!(
+            self.escrow(sale.crypt),
+            Amount::zero(),
+            "everything paid out, nothing stuck"
+        );
     }
 
     /// list -> buy, no delivery yet.
@@ -363,15 +467,8 @@ impl Market {
     pub fn delivered(&mut self) -> (Sale, client::Sealed) {
         let sale = self.paid();
         let sealed = self.seal(&sale, &sale.block);
-        let seller = self.seller.clone();
         let args = self.deliver_args(sale.crypt, &sealed);
-        self.ok(&seller, sale.crypt, "deliver", args);
+        self.ok(sale.crypt, "deliver", args);
         (sale, sealed)
     }
-}
-
-/// A DLEQ proof made by `key` for itself, with none of the honest client's checks against the
-/// registered buyer key: what a hostile client would submit.
-pub fn forged_dispute(key: &Keypair, crypt: ComponentAddress, ephemeral: &[u8; 32]) -> ([u8; 32], Proof) {
-    client::prove_shared(key, &key.public(), &context(crypt), ephemeral, &mut OsRng).unwrap()
 }

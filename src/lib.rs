@@ -3,13 +3,14 @@
 
 //! # Crypt
 //!
-//! Sealed, verifiable delivery of a secret on the Tari Ootle, with disputes settled by the template
-//! itself. No arbiter, no oracle, no trusted third party.
+//! A private, verifiable sale of a secret on the Tari Ootle, with disputes settled by the template
+//! itself. No arbiter, no oracle, no trusted third party, and no account: nobody's wallet appears in a
+//! sale.
 //!
 //! 1. `list`: the seller publishes `commitment = H(salt || len || secret || padding)`, a price, a
-//!    bond for each side, a seller key `K` and a payout account, and puts their own bond in escrow.
+//!    bond for each side and a seller key `K`, and puts their bond in escrow.
 //! 2. `buy`: the buyer pays price + bond and registers a sale key `B'` (derived client-side from a
-//!    base secret by hashing, never reused) and a payout account, proving they hold `B'`.
+//!    base secret by hashing, never reused), proving they hold it.
 //! 3. `deliver`: the seller posts `R = r·G` with a proof of knowledge of `r`, and the block encrypted
 //!    under a keystream derived from `S = r·B'`, all signed with `K`. Only the buyer can compute
 //!    `S = b'·R`; the ciphertext is public, the secret is not.
@@ -19,20 +20,28 @@
 //!      to. The buyer gets the price and both bonds;
 //!    * match: the dispute was false. The seller gets the price and both bonds.
 //! 5. Deadlines, in epochs, release the escrow if either side goes quiet.
-//! 6. Payouts go to the accounts registered at `list` and `buy`, never to the caller.
+//! 6. Each side is paid into **fresh stealth outputs**: `pay_seller` / `pay_buyer` take a stealth
+//!    transfer that spends exactly the amount owed out of the escrow into Pedersen-committed, one-time
+//!    outputs, signed by that side's Crypt key over the transfer's digest. Nobody can redirect it,
+//!    reveal it to someone else or add to it.
+//!
+//! **Where Tari's privacy does the work.** Both sides fund their part from stealth UTXOs (the bucket
+//! comes out of a stealth transfer, and the transaction fee can be paid from it too), and both are paid
+//! back into new stealth outputs. The ledger shows a component, a price, keys used for this sale only
+//! and Pedersen commitments; not who sold, who bought, or where the money went.
 //!
 //! **Authorization never uses the transaction signer.** Every action carries a proof by the acting
 //! side's Crypt key (the seller key `K`, the buyer's sale key `B'`), which lives in the Crypt client,
 //! not in the wallet. A hostile component called in
-//! the same transaction cannot accept, deliver, cancel or redirect a payout on anyone's behalf. The
+//! the same transaction cannot accept, deliver, cancel or take a payout on anyone's behalf. The
 //! component has no owner (`OwnerRule::None`), so nobody can change its rules after creation.
 //!
 //! The proof of `r` is what keeps a dispute from leaking anything: it publishes `b'·R`, and since the
 //! seller had to know `r`, that is `r·B'`, a value the seller already had. Without it, a seller could
 //! post another sale's `R` and let the buyer's dispute decrypt that other sale.
 //!
-//! Only revealed XTM is accepted: a token whose issuer can recall or freeze funds could empty or lock
-//! the escrow.
+//! The escrow only takes XTM (native stealth XTM, in its revealed form while it sits in escrow): a
+//! token whose issuer can recall or freeze funds could empty or lock it.
 //!
 //! What this guarantees: the secret delivered is the secret committed to. What it cannot guarantee:
 //! that the committed secret is worth anything. A dispute makes the secret public, that is the price
@@ -60,8 +69,12 @@ const DOMAIN_KEY: &[u8] = b"tari.ootle.crypt.key.v1";
 const DOMAIN_STREAM: &[u8] = b"tari.ootle.crypt.stream.v1";
 const DOMAIN_DLEQ: &[u8] = b"tari.ootle.crypt.dleq.v1";
 const DOMAIN_AUTH: &[u8] = b"tari.ootle.crypt.auth.v1";
+const DOMAIN_STATEMENT: &[u8] = b"tari.ootle.crypt.statement.v1";
+const MSG_BUY: &[u8] = b"buy";
 const MSG_CANCEL: &[u8] = b"cancel";
 const MSG_EPHEMERAL: &[u8] = b"ephemeral";
+const MSG_PAY_SELLER: &[u8] = b"pay_seller";
+const MSG_PAY_BUYER: &[u8] = b"pay_buyer";
 
 fn len_prefix(data: &[u8]) -> [u8; 8] {
     (data.len() as u64).to_le_bytes()
@@ -192,14 +205,12 @@ fn keystream(
     stream
 }
 
-/// Payouts only go to plain built-in accounts, so no custom code runs when the escrow pays out. Each
-/// side is paid by its own call, so a payout that fails for any reason only ever holds up that side.
-fn assert_is_account(address: &ComponentAddress, who: &str) {
-    assert!(
-        ComponentManager::get(*address).get_template_address() == BuiltinTemplate::Account.address(),
-        "the {} payout address must be a built-in account",
-        who
-    );
+/// Digest of a payout's stealth transfer, as the payee signs it: the canonical CBOR encoding of the
+/// whole statement, so no part of it (outputs, their spend authorisation, encrypted data, proofs) can
+/// be swapped after signing.
+fn statement_digest(statement: &StealthTransferStatement) -> Hash64 {
+    let encoded = tari_bor::encode(statement).expect("a decoded statement re-encodes");
+    intrinsics::hash_sha512_parts(&[&len_prefix(DOMAIN_STATEMENT), DOMAIN_STATEMENT, &encoded])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, minicbor::Encode, minicbor::Decode, minicbor::CborLen)]
@@ -249,8 +260,6 @@ mod crypt {
     pub struct Crypt {
         /// Signs deliveries and cancellation. Held by the seller's Crypt client.
         seller_key: RistrettoPublicKeyBytes,
-        seller_payout: ComponentAddress,
-        buyer_payout: Option<ComponentAddress>,
         /// The buyer's sale key `B'`, registered at `buy`.
         buyer_key: Option<RistrettoPublicKeyBytes>,
         commitment: Hash64,
@@ -284,7 +293,6 @@ mod crypt {
             delivery_window: u64,
             dispute_window: u64,
             seller_key: RistrettoPublicKeyBytes,
-            seller_payout: ComponentAddress,
             seller_bond: Bucket,
         ) -> Component<Self> {
             assert!(price.is_positive(), "price must be positive");
@@ -303,7 +311,6 @@ mod crypt {
             seller_bond.assert_contains_no_confidential_funds();
             assert!(seller_bond.amount().is_positive(), "seller bond must be positive");
             assert_valid_point(&seller_key, "seller key");
-            assert_is_account(&seller_payout, "seller");
 
             let escrow = Vault::new_empty(TARI_TOKEN);
             let bond = seller_bond.amount();
@@ -311,8 +318,6 @@ mod crypt {
 
             Component::new(Self {
                 seller_key,
-                seller_payout,
-                buyer_payout: None,
                 buyer_key: None,
                 commitment,
                 price,
@@ -336,22 +341,12 @@ mod crypt {
             .create()
         }
 
-        /// Buys. `payment` must be exactly price + buyer bond, in revealed XTM. `(c, z)` is a proof by
-        /// `buyer_key` over `"buy" || buyer_payout`: it shows the buyer holds the key, and a copy of it
-        /// cannot be used to buy into another account.
-        pub fn buy(
-            &mut self,
-            buyer_key: RistrettoPublicKeyBytes,
-            buyer_payout: ComponentAddress,
-            c: Scalar32Bytes,
-            z: Scalar32Bytes,
-            payment: Bucket,
-        ) {
+        /// Buys. `payment` must be exactly price + buyer bond, in XTM. `(c, z)` is a proof by `buyer_key`
+        /// over `"buy"`, bound to this sale: the buyer holds the key the secret will be sealed to.
+        pub fn buy(&mut self, buyer_key: RistrettoPublicKeyBytes, c: Scalar32Bytes, z: Scalar32Bytes, payment: Bucket) {
             assert!(self.stage == Stage::Listed, "not for sale");
             assert_valid_point(&buyer_key, "buyer key");
-            let message = [b"buy".as_slice(), buyer_payout.as_bytes()].concat();
-            assert_authorized(&Self::context(), &buyer_key, &message, &c, &z, "buyer");
-            assert_is_account(&buyer_payout, "buyer");
+            assert_authorized(&Self::context(), &buyer_key, MSG_BUY, &c, &z, "buyer");
 
             assert!(payment.resource_address() == TARI_TOKEN, "only XTM is accepted");
             payment.assert_contains_no_confidential_funds();
@@ -361,7 +356,6 @@ mod crypt {
 
             let now = Consensus::current_epoch();
             self.buyer_key = Some(buyer_key);
-            self.buyer_payout = Some(buyer_payout);
             self.delivery_deadline = Some(now + self.delivery_window);
             self.stage = Stage::Paid;
             emit_event("crypt_bought", metadata! { "epoch" => now.to_string() });
@@ -450,7 +444,7 @@ mod crypt {
         }
 
         /// The seller never delivered. Anyone may trigger it once the window is over; the funds can
-        /// only go to the buyer's account.
+        /// only be paid out to the buyer.
         pub fn claim_undelivered(&mut self) {
             assert!(self.stage == Stage::Paid, "not awaiting delivery");
             assert!(
@@ -477,21 +471,28 @@ mod crypt {
             self.settle(Outcome::Cancelled);
         }
 
-        /// Sends the seller's share to the seller's account. Anyone may call it.
-        pub fn pay_seller(&mut self) {
+        /// Pays the seller's share into the stealth outputs of `statement`, signed by the seller key
+        /// over the statement's digest. Anyone may submit it; only the seller can have signed it.
+        pub fn pay_seller(&mut self, statement: StealthTransferStatement, c: Scalar32Bytes, z: Scalar32Bytes) {
             assert!(self.stage == Stage::Settled, "not settled");
             let amount = self.owed_seller;
             self.owed_seller = Amount::zero();
-            self.pay(self.seller_payout, amount);
+            self.pay(amount, &self.seller_key, MSG_PAY_SELLER, statement, &c, &z, "seller");
         }
 
-        /// Sends the buyer's share to the buyer's account. Anyone may call it. Separate from
-        /// `pay_seller`, so a problem on one side can never hold the other side's funds.
-        pub fn pay_buyer(&mut self) {
+        /// Pays the buyer's share into the stealth outputs of `statement`, signed by the buyer's sale
+        /// key. Separate from `pay_seller`, so one side can never hold up the other's funds.
+        pub fn pay_buyer(&mut self, statement: StealthTransferStatement, c: Scalar32Bytes, z: Scalar32Bytes) {
             assert!(self.stage == Stage::Settled, "not settled");
             let amount = self.owed_buyer;
             self.owed_buyer = Amount::zero();
-            self.pay(self.buyer_payout.expect("no buyer"), amount);
+            let key = self.buyer_key.expect("no buyer");
+            self.pay(amount, &key, MSG_PAY_BUYER, statement, &c, &z, "buyer");
+        }
+
+        /// The digest a payout statement is signed over. Exposed so a client can check its own.
+        pub fn payout_digest(statement: StealthTransferStatement) -> Hash64 {
+            statement_digest(&statement)
         }
 
         /// The commitment a block must hash to. Exposed so a buyer can check a delivery off-chain.
@@ -553,10 +554,41 @@ mod crypt {
             CallerContext::current_component_address().as_bytes().to_vec()
         }
 
-        fn pay(&self, account: ComponentAddress, amount: Amount) {
+        /// Moves exactly `amount` out of the escrow into the stealth outputs of `statement`. The
+        /// statement may spend nothing but that amount (no stealth inputs of its own), and must put all
+        /// of it into stealth outputs (no revealed output that could hand it to someone else).
+        #[allow(clippy::too_many_arguments)]
+        fn pay(
+            &self,
+            amount: Amount,
+            key: &RistrettoPublicKeyBytes,
+            action: &[u8],
+            statement: StealthTransferStatement,
+            c: &Scalar32Bytes,
+            z: &Scalar32Bytes,
+            who: &str,
+        ) {
             assert!(amount.is_positive(), "nothing owed");
-            let funds = self.escrow.withdraw(amount);
-            ComponentManager::get(account).invoke("deposit", args![funds]);
+            assert!(
+                statement.inputs_statement.inputs.is_empty(),
+                "a payout spends the escrow only, no stealth inputs"
+            );
+            assert!(
+                statement.inputs_statement.revealed_amount == amount,
+                "a payout must spend exactly the amount owed"
+            );
+            assert!(
+                statement.outputs_statement.revealed_output.is_none(),
+                "a payout goes to stealth outputs only"
+            );
+            assert!(
+                !statement.outputs_statement.outputs.is_empty(),
+                "a payout needs stealth outputs"
+            );
+            let message = [action, statement_digest(&statement).as_ref()].concat();
+            assert_authorized(&Self::context(), key, &message, c, z, who);
+
+            self.escrow.withdraw(amount).stealth_transfer(statement).drop_empty();
         }
 
         /// The single exit from every non-final stage. Distributes the whole escrow between the two

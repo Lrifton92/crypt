@@ -14,7 +14,9 @@
 //! * the buyer **opens** it with `S = b'·R`;
 //! * if the block does not match the commitment, the buyer publishes `S` with a **DLEQ proof** that
 //!   `S = b'·R`. The template re-derives the keystream, decrypts, re-hashes and settles;
-//! * buy, deliver, accept and cancel carry a Schnorr proof by the acting side's key (the buyer's sale
+//! * each side is paid into fresh stealth outputs, with a proof by its key over the digest of the
+//!   stealth transfer (`statement_digest`), so no one can redirect a payout;
+//! * buy, deliver, accept, cancel and payouts carry a Schnorr proof by the acting side's key (the buyer's sale
 //!   key, the seller's key) over the action and its arguments. Nothing is authorized by the
 //!   transaction signer, so a hostile component called in the same transaction cannot act for either
 //!   side.
@@ -55,6 +57,7 @@ pub const DOMAIN_KEY: &[u8] = b"tari.ootle.crypt.key.v1";
 pub const DOMAIN_STREAM: &[u8] = b"tari.ootle.crypt.stream.v1";
 pub const DOMAIN_DLEQ: &[u8] = b"tari.ootle.crypt.dleq.v1";
 pub const DOMAIN_AUTH: &[u8] = b"tari.ootle.crypt.auth.v1";
+pub const DOMAIN_STATEMENT: &[u8] = b"tari.ootle.crypt.statement.v1";
 /// Client-only: derivation of a buyer's sale key from their base secret.
 pub const DOMAIN_SALE_KEY: &[u8] = b"tari.ootle.crypt.sale-key.v1";
 
@@ -63,15 +66,24 @@ const _: () = assert!(PLAINTEXT_LEN.is_multiple_of(64) && PLAINTEXT_LEN / 64 <= 
 
 /// Action messages. Each proof signs one of these, length-prefixed inside the challenge, so a proof
 /// for one action never verifies as another.
+pub const MSG_BUY: &[u8] = b"buy";
 pub const MSG_CANCEL: &[u8] = b"cancel";
+pub const MSG_PAY_SELLER: &[u8] = b"pay_seller";
+pub const MSG_PAY_BUYER: &[u8] = b"pay_buyer";
 /// Signed by the ephemeral key `R` itself: proves the seller knows `r`.
 pub const MSG_EPHEMERAL: &[u8] = b"ephemeral";
 
-/// `buy` binds the account the buyer will be paid into, so a copied proof cannot be reused by
-/// someone else to take the purchase.
+/// Digest of a payout's stealth transfer: SHA-512 over the canonical CBOR encoding of the whole
+/// `StealthTransferStatement`, exactly as the template re-encodes it.
 #[must_use]
-pub fn msg_buy(buyer_payout: &[u8]) -> Vec<u8> {
-    [b"buy".as_slice(), buyer_payout].concat()
+pub fn statement_digest(encoded_statement: &[u8]) -> [u8; 64] {
+    sha512_parts(&[&len_prefix(DOMAIN_STATEMENT), DOMAIN_STATEMENT, encoded_statement])
+}
+
+/// A payout is signed over its action (`MSG_PAY_SELLER` / `MSG_PAY_BUYER`) and the statement digest.
+#[must_use]
+pub fn msg_pay(action: &[u8], digest: &[u8; 64]) -> Vec<u8> {
+    [action, digest.as_slice()].concat()
 }
 
 /// `deliver` binds `R` and the ciphertext, so only the seller's key can put a delivery on the ledger.
@@ -554,10 +566,29 @@ mod tests {
             !verify_action(&other.public(), CTX, &msg_accept(&r), &proof),
             "claimed for another key"
         );
-        let buy = prove_action(&kp, CTX, &msg_buy(b"account-1"), &mut OsRng);
+        let pay = prove_action(
+            &kp,
+            CTX,
+            &msg_pay(MSG_PAY_SELLER, &statement_digest(b"one")),
+            &mut OsRng,
+        );
         assert!(
-            !verify_action(&kp.public(), CTX, &msg_buy(b"account-2"), &buy),
-            "copied to pay another account"
+            !verify_action(
+                &kp.public(),
+                CTX,
+                &msg_pay(MSG_PAY_SELLER, &statement_digest(b"two")),
+                &pay
+            ),
+            "a payout signature covers one statement only"
+        );
+        assert!(
+            !verify_action(
+                &kp.public(),
+                CTX,
+                &msg_pay(MSG_PAY_BUYER, &statement_digest(b"one")),
+                &pay
+            ),
+            "a seller payout signature is not a buyer payout signature"
         );
     }
 

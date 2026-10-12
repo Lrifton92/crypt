@@ -8,8 +8,11 @@
 //! the network, and no secret is ever taken from the command line: secrets and keys live in files,
 //! so they stay out of shell history and process listings.
 //!
-//! Seller: `keygen` → `commit` → list → `seal` → deliver. Buyer: `keygen` (a base key) → `buy` →
-//! `open` → `accept`, or `dispute` if `open` says so.
+//! Seller: `keygen` → `commit` → list → `seal` → deliver → `payout`. Buyer: `keygen` (a base key) →
+//! `buy` → `open` → `accept`, or `dispute` if `open` says so → `payout` if owed anything.
+//!
+//! Funds come from and go back to stealth outputs: the wallet builds the stealth transfers, this tool
+//! signs the payout transfer's digest with the payee's Crypt key.
 
 use std::{
     fs::{self, OpenOptions},
@@ -22,7 +25,7 @@ use std::{
 use clap::{Parser, Subcommand};
 use crypt_core::{self as core, Keypair, Proof};
 use rand_core::OsRng;
-use tari_template_lib_types::ComponentAddress;
+use tari_template_lib_types::{stealth::StealthTransferStatement, ComponentAddress};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -58,9 +61,6 @@ enum Command {
         base_key: PathBuf,
         #[arg(long)]
         component: String,
-        /// The account the buyer will be paid into if the sale ends in their favour.
-        #[arg(long)]
-        payout: String,
     },
     /// Seller: seals the block to the buyer's sale key and signs the delivery.
     Seal {
@@ -118,6 +118,19 @@ enum Command {
         #[arg(long)]
         component: String,
     },
+    /// Either side, once settled: signs the stealth transfer that pays you, as built by your wallet
+    /// (hex-encoded CBOR `StealthTransferStatement` in `--statement`). Seller: `--seller-key`. Buyer:
+    /// `--base-key`. Prints the digest signed and the proof for `pay_seller` / `pay_buyer`.
+    Payout {
+        #[arg(long, conflicts_with = "base_key", required_unless_present = "base_key")]
+        seller_key: Option<PathBuf>,
+        #[arg(long)]
+        base_key: Option<PathBuf>,
+        #[arg(long)]
+        component: String,
+        #[arg(long)]
+        statement: PathBuf,
+    },
 }
 
 /// Exit status of `open` when the delivery must be disputed.
@@ -147,19 +160,11 @@ fn run(command: Command) -> Result<ExitCode, String> {
             write_private(&out, &Zeroizing::new(hex::encode(*block)))?;
             print_hex("commitment", &core::commitment_of(&block));
         }
-        Command::Buy {
-            base_key,
-            component,
-            payout,
-        } => {
+        Command::Buy { base_key, component } => {
             let ctx = context(&component)?;
-            let payout = address(&payout)?;
             let key = read_key(&base_key)?.for_sale(&ctx);
             print_hex("buyer_key", &key.public());
-            print_proof(
-                "",
-                &core::prove_action(&key, &ctx, &core::msg_buy(payout.as_bytes()), &mut OsRng),
-            );
+            print_proof("", &core::prove_action(&key, &ctx, core::MSG_BUY, &mut OsRng));
         }
         Command::Seal {
             seller_key,
@@ -234,6 +239,12 @@ fn run(command: Command) -> Result<ExitCode, String> {
             print_hex("shared", &shared);
             print_proof("", &proof);
         }
+        Command::Payout {
+            seller_key,
+            base_key,
+            component,
+            statement,
+        } => payout(seller_key, base_key, &component, &statement)?,
         Command::Cancel { seller_key, component } => {
             let ctx = context(&component)?;
             let seller = read_key(&seller_key)?;
@@ -241,6 +252,32 @@ fn run(command: Command) -> Result<ExitCode, String> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn payout(
+    seller_key: Option<PathBuf>,
+    base_key: Option<PathBuf>,
+    component: &str,
+    statement: &Path,
+) -> Result<(), String> {
+    let ctx = context(component)?;
+    let (key, action) = match (seller_key, base_key) {
+        (Some(path), None) => (read_key(&path)?, core::MSG_PAY_SELLER),
+        (None, Some(path)) => (read_key(&path)?.for_sale(&ctx), core::MSG_PAY_BUYER),
+        _ => return Err("give exactly one of --seller-key or --base-key".into()),
+    };
+    let text = fs::read_to_string(statement).map_err(|e| io_error(statement, &e))?;
+    let bytes = hex::decode(text.trim()).map_err(|e| format!("{}: not hex ({e})", statement.display()))?;
+    // Decoded and re-encoded, so the digest is over the canonical encoding the template computes.
+    let decoded: StealthTransferStatement =
+        tari_bor::decode(&bytes).map_err(|e| format!("{}: not a stealth transfer ({e})", statement.display()))?;
+    let digest = core::statement_digest(&tari_bor::encode(&decoded).map_err(|e| e.to_string())?);
+    print_hex("digest", &digest);
+    print_proof(
+        "",
+        &core::prove_action(&key, &ctx, &core::msg_pay(action, &digest), &mut OsRng),
+    );
+    Ok(())
 }
 
 fn describe(e: core::Error) -> String {

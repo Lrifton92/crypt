@@ -9,9 +9,13 @@ use std::{
 };
 
 use crypt_core as core;
+use tari_template_lib_types::{
+    crypto::RistrettoPublicKeyBytes,
+    stealth::{StealthInputsStatement, StealthOutputsStatement, StealthTransferStatement},
+    Amount,
+};
 
 const COMPONENT: &str = "component_0101010101010101010101010101010101010101010101010101010101010101";
-const PAYOUT: &str = "component_0202020202020202020202020202020202020202020202020202020202020202";
 const SECRET: &[u8] = b"vault combination: 31-04-77";
 
 struct Dir(PathBuf);
@@ -93,20 +97,12 @@ fn a_whole_sale_through_the_cli() {
     let listed = fields(&["commit", "--secret-file", &secret, "--out", &block]);
     let commitment = listed["commitment"].clone();
 
-    let bought = fields(&[
-        "buy",
-        "--base-key",
-        &base_key,
-        "--component",
-        COMPONENT,
-        "--payout",
-        PAYOUT,
-    ]);
+    let bought = fields(&["buy", "--base-key", &base_key, "--component", COMPONENT]);
     let buyer_key: [u8; 32] = bytes(&bought["buyer_key"]);
     assert!(core::verify_action(
         &buyer_key,
         &ctx,
-        &core::msg_buy(&context_of(PAYOUT)),
+        core::MSG_BUY,
         &proof(&bought, "")
     ));
 
@@ -214,15 +210,7 @@ fn open_says_to_dispute_a_delivery_that_is_not_the_listing() {
     let listed = fields(&["commit", "--secret-file", &secret, "--out", &block]);
     // The seller seals a different block than the one listed.
     fields(&["commit", "--secret-file", &secret, "--out", &other]);
-    let bought = fields(&[
-        "buy",
-        "--base-key",
-        &base_key,
-        "--component",
-        COMPONENT,
-        "--payout",
-        PAYOUT,
-    ]);
+    let bought = fields(&["buy", "--base-key", &base_key, "--component", COMPONENT]);
     let sealed = fields(&[
         "seal",
         "--seller-key",
@@ -258,15 +246,7 @@ fn a_dispute_is_refused_with_a_key_that_is_not_the_registered_one() {
     let (base_key, other_key) = (dir.path("buyer.key"), dir.path("other.key"));
     fields(&["keygen", "--out", &base_key]);
     fields(&["keygen", "--out", &other_key]);
-    let bought = fields(&[
-        "buy",
-        "--base-key",
-        &base_key,
-        "--component",
-        COMPONENT,
-        "--payout",
-        PAYOUT,
-    ]);
+    let bought = fields(&["buy", "--base-key", &base_key, "--component", COMPONENT]);
     let r = fields(&["public", "--key", &other_key])["public_key"].clone();
     let out = crypt(&[
         "dispute",
@@ -301,15 +281,7 @@ fn bad_inputs_are_refused_with_a_reason() {
     fields(&["keygen", "--out", &key]);
     for (args, reason) in [
         (
-            vec![
-                "buy",
-                "--base-key",
-                &key,
-                "--component",
-                "component_zz",
-                "--payout",
-                PAYOUT,
-            ],
+            vec!["buy", "--base-key", &key, "--component", "component_zz"],
             "not a component address",
         ),
         (
@@ -338,4 +310,83 @@ fn bad_inputs_are_refused_with_a_reason() {
     fs::write(&too_long, vec![b'x'; core::MAX_SECRET_LEN + 1]).unwrap();
     let out = crypt(&["commit", "--secret-file", &too_long, "--out", &dir.path("block.hex")]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("longer than"));
+}
+
+fn statement_file(dir: &Dir, amount: u64) -> (String, StealthTransferStatement) {
+    let statement = StealthTransferStatement {
+        inputs_statement: StealthInputsStatement::new_revealed_only(Amount::from_u64(amount)),
+        outputs_statement: StealthOutputsStatement::new_revealed_only(
+            Amount::from_u64(amount),
+            RistrettoPublicKeyBytes::from_bytes(&[7u8; 32]).unwrap(),
+        ),
+        balance_proof: None,
+        covenant_claims: vec![],
+    };
+    let path = dir.path("payout.hex");
+    fs::write(&path, hex::encode(tari_bor::encode(&statement).unwrap())).unwrap();
+    (path, statement)
+}
+
+#[test]
+fn payout_signs_the_digest_of_the_wallets_transfer_for_the_right_side() {
+    let dir = Dir::new("payout");
+    let (seller_key, base_key) = (dir.path("seller.key"), dir.path("buyer.key"));
+    let seller: [u8; 32] = bytes(&fields(&["keygen", "--out", &seller_key])["public_key"]);
+    fields(&["keygen", "--out", &base_key]);
+    let buyer: [u8; 32] = bytes(&fields(&["buy", "--base-key", &base_key, "--component", COMPONENT])["buyer_key"]);
+    let (file, statement) = statement_file(&dir, 1_500);
+    let digest = core::statement_digest(&tari_bor::encode(&statement).unwrap());
+    let ctx = context_of(COMPONENT);
+
+    let signed = fields(&[
+        "payout",
+        "--seller-key",
+        &seller_key,
+        "--component",
+        COMPONENT,
+        "--statement",
+        &file,
+    ]);
+    assert_eq!(bytes::<64>(&signed["digest"]), digest);
+    let message = core::msg_pay(core::MSG_PAY_SELLER, &digest);
+    assert!(core::verify_action(&seller, &ctx, &message, &proof(&signed, "")));
+
+    let signed = fields(&[
+        "payout",
+        "--base-key",
+        &base_key,
+        "--component",
+        COMPONENT,
+        "--statement",
+        &file,
+    ]);
+    let message = core::msg_pay(core::MSG_PAY_BUYER, &digest);
+    assert!(
+        core::verify_action(&buyer, &ctx, &message, &proof(&signed, "")),
+        "signed by the sale key"
+    );
+
+    let both = crypt(&[
+        "payout",
+        "--seller-key",
+        &seller_key,
+        "--base-key",
+        &base_key,
+        "--component",
+        COMPONENT,
+        "--statement",
+        &file,
+    ]);
+    assert!(!both.status.success(), "one side at a time");
+    fs::write(&file, "00ff").unwrap();
+    let garbage = crypt(&[
+        "payout",
+        "--seller-key",
+        &seller_key,
+        "--component",
+        COMPONENT,
+        "--statement",
+        &file,
+    ]);
+    assert!(String::from_utf8_lossy(&garbage.stderr).contains("not a stealth transfer"));
 }

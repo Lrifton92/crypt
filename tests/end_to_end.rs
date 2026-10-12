@@ -1,9 +1,10 @@
 //! Crypt against a simulated Ootle ledger, driven by the real client code in `crypt_core`.
 //!
-//! Every way a sale can end, with the money checked down to the accounts. The happy paths double as
-//! cross-implementation checks: the client derives keys, seals and proves with `curve25519-dalek` +
-//! `sha2`, the template verifies with engine intrinsics, so any divergence breaks a test instead of a
-//! sale. The attacks are in `attacks.rs`.
+//! Every way a sale can end, funded from stealth coins and paid out into fresh stealth outputs that
+//! are then actually spent, so each test proves the right party ends up controlling the right amount.
+//! The happy paths double as cross-implementation checks: the client derives keys, seals, proves and
+//! digests with `curve25519-dalek` + `sha2`, the template verifies with engine intrinsics, so any
+//! divergence breaks a test instead of a sale. The attacks are in `attacks.rs`.
 //!
 //! Linux/macOS only: `tari_template_test_tooling` pulls the engine, whose Cranelift JIT does not build
 //! on Windows. CI runs it.
@@ -22,6 +23,16 @@ fn the_template_and_the_client_hash_a_block_identically() {
 }
 
 #[test]
+fn the_template_and_the_client_digest_a_payout_identically() {
+    let mut m = Market::new();
+    let statement = payout_statement(1_234).statement;
+    let on_chain: Hash64 = m
+        .test
+        .call_function("Crypt", "payout_digest", args![statement.clone()], vec![]);
+    assert_eq!(on_chain, Hash64::from(digest_of(&statement)));
+}
+
+#[test]
 fn the_template_registers_the_buyer_sale_key() {
     let mut m = Market::new();
     let sale = m.paid();
@@ -32,10 +43,7 @@ fn the_template_registers_the_buyer_sale_key() {
 #[test]
 fn an_honest_sale_pays_the_seller_and_returns_both_bonds() {
     let mut m = Market::new();
-    let seller_before = m.balance(m.seller.account);
-    let buyer_before = m.balance(m.buyer.account);
     let (sale, _) = m.delivered();
-    let buyer = m.buyer.clone();
 
     // The buyer reads the delivery from the ledger and opens it off-chain, checked against the listing.
     let (ephemeral, ciphertext): (RistrettoPublicKeyBytes, Bytes) = m
@@ -56,38 +64,25 @@ fn an_honest_sale_pays_the_seller_and_returns_both_bonds() {
     assert_eq!(secret, SECRET);
 
     let args = m.accept_args(&sale);
-    m.ok(&buyer, sale.crypt, "accept", args);
+    m.ok(sale.crypt, "accept", args);
     assert_eq!(m.outcome(sale.crypt).as_deref(), Some("Accepted"));
     assert_eq!(m.owed(sale.crypt), (a(PRICE + SELLER_BOND), a(BUYER_BOND)));
-
-    m.pay_out(sale.crypt);
-    assert_eq!(
-        m.balance(m.seller.account),
-        seller_before + a(PRICE),
-        "seller: + price, bond back"
-    );
-    assert_eq!(
-        m.balance(m.buyer.account),
-        buyer_before - a(PRICE),
-        "buyer: - price, bond back"
-    );
+    m.pay_out(&sale);
 }
 
 #[test]
 fn a_false_dispute_pays_the_seller_and_costs_the_buyer_the_bond() {
     let mut m = Market::new();
     let (sale, sealed) = m.delivered();
-    let buyer = m.buyer.clone();
     let args = m.dispute_args(&sale, &sealed.ephemeral);
-    m.ok(&buyer, sale.crypt, "dispute", args);
+    m.ok(sale.crypt, "dispute", args);
 
     assert_eq!(m.outcome(sale.crypt).as_deref(), Some("DisputeRejected"));
     assert_eq!(
         m.owed(sale.crypt),
         (a(PRICE + SELLER_BOND + BUYER_BOND), Amount::zero())
     );
-    m.refused(&buyer, sale.crypt, "pay_buyer", args![], "nothing owed");
-    m.pay_out(sale.crypt);
+    m.pay_out(&sale);
 }
 
 #[test]
@@ -96,10 +91,8 @@ fn a_seller_who_delivers_something_else_loses_the_sale_and_the_bond() {
     let sale = m.paid();
     let other = client::encode_plaintext(b"not what you paid for", &mut OsRng).unwrap();
     let sealed = m.seal(&sale, &other);
-    let seller = m.seller.clone();
-    let buyer = m.buyer.clone();
     let args = m.deliver_args(sale.crypt, &sealed);
-    m.ok(&seller, sale.crypt, "deliver", args);
+    m.ok(sale.crypt, "deliver", args);
 
     // The client flags it before the buyer does anything.
     let commitment = client::commitment_of(&sale.block);
@@ -115,43 +108,38 @@ fn a_seller_who_delivers_something_else_loses_the_sale_and_the_bond() {
     );
 
     let args = m.dispute_args(&sale, &sealed.ephemeral);
-    m.ok(&buyer, sale.crypt, "dispute", args);
+    m.ok(sale.crypt, "dispute", args);
     assert_eq!(m.outcome(sale.crypt).as_deref(), Some("Fraud"));
     assert_eq!(
         m.owed(sale.crypt),
         (Amount::zero(), a(PRICE + BUYER_BOND + SELLER_BOND))
     );
-    m.refused(&seller, sale.crypt, "pay_seller", args![], "nothing owed");
-    m.pay_out(sale.crypt);
+    m.pay_out(&sale);
 }
 
 #[test]
 fn silence_after_delivery_pays_the_seller() {
     let mut m = Market::new();
     let (sale, _) = m.delivered();
-    let stranger = m.stranger.clone();
     m.epoch(START_EPOCH + DISPUTE_WINDOW + 1);
-    m.ok(&stranger, sale.crypt, "claim_uncontested", args![]);
+    m.ok(sale.crypt, "claim_uncontested", args![]);
     assert_eq!(m.outcome(sale.crypt).as_deref(), Some("Uncontested"));
     assert_eq!(m.owed(sale.crypt), (a(PRICE + SELLER_BOND), a(BUYER_BOND)));
-    m.pay_out(sale.crypt);
+    m.pay_out(&sale);
 }
 
 #[test]
 fn no_delivery_returns_everything_to_the_buyer() {
     let mut m = Market::new();
-    let buyer_before = m.balance(m.buyer.account);
     let sale = m.paid();
-    let stranger = m.stranger.clone();
     m.epoch(START_EPOCH + DELIVERY_WINDOW + 1);
-    m.ok(&stranger, sale.crypt, "claim_undelivered", args![]);
+    m.ok(sale.crypt, "claim_undelivered", args![]);
     assert_eq!(m.outcome(sale.crypt).as_deref(), Some("Undelivered"));
-    m.pay_out(sale.crypt);
     assert_eq!(
-        m.balance(m.buyer.account),
-        buyer_before + a(SELLER_BOND),
-        "buyer: everything back, plus the seller's bond"
+        m.owed(sale.crypt),
+        (Amount::zero(), a(PRICE + BUYER_BOND + SELLER_BOND))
     );
+    m.pay_out(&sale);
 }
 
 #[test]
@@ -159,10 +147,13 @@ fn the_seller_can_cancel_before_a_sale() {
     let mut m = Market::new();
     let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
     let crypt = m.list(&block);
-    let seller = m.seller.clone();
-    m.refused(&seller, crypt, "pay_seller", args![], "not settled");
     let args = m.cancel_args(crypt);
-    m.ok(&seller, crypt, "cancel", args);
+    m.ok(crypt, "cancel", args);
     assert_eq!(m.owed(crypt), (a(SELLER_BOND), Amount::zero()));
-    m.pay_out(crypt);
+    let unsold = Sale {
+        crypt,
+        block,
+        buyer_key: Keypair::generate(&mut OsRng),
+    };
+    m.pay_out(&unsold);
 }

@@ -37,10 +37,10 @@ mod evil {
             ComponentManager::get(crypt).invoke("deliver", args![ephemeral, zero(), zero(), noise, zero(), zero()]);
         }
 
-        /// Triggers a payout from inside a hostile call. The funds must still land in the registered
-        /// account and nowhere else.
-        pub fn trigger_payout(crypt: ComponentAddress) {
-            ComponentManager::get(crypt).invoke("pay_buyer", args![]);
+        /// Tries to take a buyer's payout into outputs of its own choosing, without the buyer's
+        /// signature.
+        pub fn steal_payout(crypt: ComponentAddress, statement: StealthTransferStatement) {
+            ComponentManager::get(crypt).invoke("pay_buyer", args![statement, zero(), zero()]);
         }
     }
 }
