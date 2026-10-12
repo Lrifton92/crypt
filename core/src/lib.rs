@@ -196,7 +196,7 @@ impl Keypair {
         let derived = Scalar::from_bytes_mod_order_wide(&wide);
         // A zero scalar is a 2^-252 event; deriving again under a marker keeps the function total.
         if derived == Scalar::ZERO {
-            return self.derive(domain, &[context, b" ".as_slice()].concat());
+            return self.derive(domain, &[context, b"\x00".as_slice()].concat());
         }
         Self::from_scalar(derived)
     }
