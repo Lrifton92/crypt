@@ -567,7 +567,13 @@ fn a_listing_sells_once_and_a_replayed_buy_is_refused() {
         replay.map(|r| r.finalize.any_reject().is_some()).unwrap_or(true),
         "the very same transaction must not execute twice"
     );
-    m.buy_with(crypt, &Keypair::generate(&mut OsRng));
+
+    // A second, honest buyer with a fresh key and a valid proof: the listing is gone.
+    let stranger = m.stranger.clone();
+    let other = Keypair::generate(&mut OsRng);
+    let proof = client::prove_action(&other.for_sale(&ctx), &ctx, &client::msg_buy(stranger.account.as_bytes()), &mut OsRng);
+    let tx = m.buy_tx(&stranger, crypt, other.public(), stranger.account, proof, PRICE + BUYER_BOND);
+    assert_reject_reason(m.test.execute_expect_failure(tx, vec![stranger.proof.clone()]), "not for sale");
 }
 
 // ================================================================================================
