@@ -1,0 +1,15 @@
+[package]
+name = "crypt_core"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-3-Clause"
+description = "Client-side cryptography for the Crypt template: sealing, opening, and the proofs the template verifies."
+
+[dependencies]
+curve25519-dalek = { version = "4.1", default-features = false, features = ["alloc", "zeroize", "rand_core"] }
+sha2 = { version = "0.10", default-features = false }
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = { version = "1.7", default-features = false }
+
+[dev-dependencies]
+proptest = "1.5"

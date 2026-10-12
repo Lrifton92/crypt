@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  client:
+    # The client-side cryptography on its own: sealing, opening, both proofs, property tests.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Test crypt_core
+        run: cargo test -p crypt_core --verbose
+      - name: Lint crypt_core
+        run: cargo clippy -p crypt_core --all-targets -- -D warnings
+
+  template:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the template
+        run: cargo build -p crypt --release --target wasm32-unknown-unknown
+      - name: Lint
+        run: cargo clippy -p crypt --release --target wasm32-unknown-unknown -- -D warnings
+      - name: Report the artefact size
+        run: ls -l target/wasm32-unknown-unknown/release/crypt.wasm
+
+  end-to-end:
+    # Every attack in THREAT_MODEL.md, played against a simulated Ootle ledger with the real client.
+    # Linux only: the engine pulls a Cranelift JIT that does not build on Windows.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Play every sale and every attack
+        run: cargo test -p crypt --test end_to_end -- --nocapture

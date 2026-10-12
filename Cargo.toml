@@ -1,0 +1,41 @@
+[workspace]
+members = ["core"]
+
+[package]
+name = "crypt"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-3-Clause"
+description = "Sealed, verifiable delivery of a secret on the Tari Ootle. Disputes are settled by the template itself."
+
+[package.metadata.tari-template]
+tags = ["privacy", "escrow", "encryption", "marketplace", "dleq"]
+category = "defi"
+documentation = "https://github.com/Lrifton92/crypt#readme"
+homepage = "https://github.com/Lrifton92/crypt"
+
+[dependencies]
+tari_template_lib = "0.34.0"
+tari_template_abi = "0.20.1"
+minicbor = { version = "2.3", default-features = false, features = ["derive", "alloc"] }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[build-dependencies]
+tari_ootle_template_build = "0.11"
+
+# End-to-end tests only (tests/end_to_end.rs). They pull the Ootle engine, whose Cranelift JIT does not
+# build on Windows, so `cargo test --test end_to_end` is a Linux/macOS and CI operation.
+[dev-dependencies]
+crypt_core = { path = "core" }
+rand_core = { version = "0.6", features = ["getrandom"] }
+tari_template_test_tooling = "0.45"
+tari_template_lib_types = "0.34.0"
