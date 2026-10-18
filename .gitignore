@@ -6,3 +6,5 @@ demo/wasm/pkg/
 fuzz/artifacts/
 fuzz/corpus/
 fuzz/target/
+demo/web/playwright-report/
+demo/web/test-results/
