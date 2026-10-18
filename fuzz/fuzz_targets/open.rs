@@ -8,7 +8,9 @@ fuzz_target!(|data: &[u8]| {
     if data.len() < 32 + 32 + 64 + PLAINTEXT_LEN {
         return;
     }
-    let Some(key) = Keypair::from_secret_bytes(&data[..32].try_into().unwrap()) else { return };
+    let Some(key) = Keypair::from_secret_bytes(&data[..32].try_into().unwrap()) else {
+        return;
+    };
     let ephemeral: [u8; 32] = data[32..64].try_into().unwrap();
     let commitment: [u8; 64] = data[64..128].try_into().unwrap();
     let ciphertext: [u8; PLAINTEXT_LEN] = data[128..128 + PLAINTEXT_LEN].try_into().unwrap();

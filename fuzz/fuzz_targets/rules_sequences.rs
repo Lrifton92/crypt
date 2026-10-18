@@ -65,7 +65,10 @@ fuzz_target!(|bytes: &[u8]| {
     let buyer = Keypair::generate(&mut rng);
 
     // A proof nobody signed never lists.
-    let forged = Proof { c: [t[0]; 32], z: [t[1]; 32] };
+    let forged = Proof {
+        c: [t[0]; 32],
+        z: [t[1]; 32],
+    };
     assert!(Sale::list(CONTEXT, 0, commitment, terms, seller.public(), &forged).is_err());
     let proof = prove_action(&seller, LIST_CONTEXT, &terms.list_message(&commitment), &mut rng);
     let mut sale = Sale::list(CONTEXT, 0, commitment, terms, seller.public(), &proof).expect("valid terms list");
@@ -75,7 +78,10 @@ fuzz_target!(|bytes: &[u8]| {
     while let Some([op, epoch]) = take::<2>(&mut data) {
         let epoch = u64::from(epoch % 40);
         let before = sale.stage();
-        let junk = Proof { c: [op; 32], z: [epoch as u8; 32] };
+        let junk = Proof {
+            c: [op; 32],
+            z: [epoch as u8; 32],
+        };
         let honest_seal = |b: &[u8; PLAINTEXT_LEN], rng: &mut Rng| seal(b, &buyer.public(), CONTEXT, rng).unwrap();
         let (forged_move, result) = match op % 10 {
             0 => {
@@ -84,11 +90,19 @@ fuzz_target!(|bytes: &[u8]| {
                 let paid = if op & 0x10 == 0 { due } else { due + 1 };
                 (paid != due, sale.buy(epoch, buyer.public(), &p, paid))
             }
-            1 => (true, sale.buy(epoch, seller.public(), &junk, terms.price + terms.buyer_bond)),
+            1 => (
+                true,
+                sale.buy(epoch, seller.public(), &junk, terms.price + terms.buyer_bond),
+            ),
             2 | 3 => {
                 let real = op % 10 == 2;
                 let sealed = honest_seal(if real { &block } else { &fake }, &mut rng);
-                let p = prove_action(&seller, CONTEXT, &msg_deliver(&sealed.ephemeral, &sealed.ciphertext), &mut rng);
+                let p = prove_action(
+                    &seller,
+                    CONTEXT,
+                    &msg_deliver(&sealed.ephemeral, &sealed.ciphertext),
+                    &mut rng,
+                );
                 let r = sale.deliver(epoch, &sealed, &p);
                 if r.is_ok() {
                     delivered_true = Some(real);
@@ -96,7 +110,11 @@ fuzz_target!(|bytes: &[u8]| {
                 (false, r)
             }
             4 => {
-                let sealed = Sealed { ephemeral: buyer.public(), ephemeral_proof: junk, ciphertext: [op; PLAINTEXT_LEN] };
+                let sealed = Sealed {
+                    ephemeral: buyer.public(),
+                    ephemeral_proof: junk,
+                    ciphertext: [op; PLAINTEXT_LEN],
+                };
                 (true, sale.deliver(epoch, &sealed, &junk))
             }
             5 => {
@@ -109,7 +127,11 @@ fuzz_target!(|bytes: &[u8]| {
                     let (shared, p) = prove_shared(&buyer, &buyer.public(), CONTEXT, &eph, &mut rng).unwrap();
                     let r = sale.dispute(epoch, shared, &p);
                     if let Ok(outcome) = r {
-                        let expected = if delivered_true == Some(true) { Outcome::DisputeRejected } else { Outcome::Fraud };
+                        let expected = if delivered_true == Some(true) {
+                            Outcome::DisputeRejected
+                        } else {
+                            Outcome::Fraud
+                        };
                         assert_eq!(outcome, expected, "the verdict does not match the delivery");
                     }
                     (false, r.map(drop))

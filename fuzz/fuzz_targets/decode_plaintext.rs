@@ -5,7 +5,9 @@ use crypt_core::{decode_plaintext, PLAINTEXT_LEN, SALT_LEN};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(block) = <[u8; PLAINTEXT_LEN]>::try_from(data) else { return };
+    let Ok(block) = <[u8; PLAINTEXT_LEN]>::try_from(data) else {
+        return;
+    };
     if let Ok(secret) = decode_plaintext(&block) {
         let len = u16::from_le_bytes([block[SALT_LEN], block[SALT_LEN + 1]]) as usize;
         assert_eq!(secret.len(), len);
