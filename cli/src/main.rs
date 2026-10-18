@@ -83,6 +83,12 @@ enum Command {
         /// The `buyer_key` the template shows for this sale.
         #[arg(long)]
         buyer_key: String,
+        /// The `c` of the `buy` transaction: sealing checks the buyer key was bought on this component.
+        #[arg(long)]
+        buy_c: String,
+        /// The `z` of the `buy` transaction.
+        #[arg(long)]
+        buy_z: String,
     },
     /// Buyer: opens the delivery. Writes the secret to stdout if it is exactly what was listed;
     /// otherwise exits with status 2 and says why: dispute, do not accept.
@@ -98,7 +104,8 @@ enum Command {
         #[arg(long)]
         commitment: String,
     },
-    /// Buyer: proof for `accept`, bound to this delivery.
+    /// Buyer: proof for `accept`, bound to this delivery. Opens the delivery first and refuses to
+    /// accept anything but the listed secret.
     Accept {
         #[arg(long)]
         base_key: PathBuf,
@@ -106,6 +113,10 @@ enum Command {
         component: String,
         #[arg(long)]
         ephemeral: String,
+        #[arg(long)]
+        ciphertext: String,
+        #[arg(long)]
+        commitment: String,
     },
     /// Buyer: shared point and DLEQ proof for `dispute`. Refuses unless the derived sale key is the
     /// one registered on-chain: a wrong-key dispute would be refused and still publish a point.
@@ -179,7 +190,8 @@ fn run(command: Command) -> Result<ExitCode, String> {
                 "back up {}: it is the only way to collect what a sale owes you",
                 out.display()
             );
-            print_hex("public_key", &key.public());
+            eprintln!("this is a base key: never use it on-chain; commit and buy derive the keys a sale uses");
+            print_hex("base_public_key", &key.public());
         }
         Command::Public { key } => print_hex("public_key", &read_key(&key)?.public()),
         Command::Commit {
@@ -207,11 +219,28 @@ fn run(command: Command) -> Result<ExitCode, String> {
             block,
             component,
             buyer_key,
+            buy_c,
+            buy_z,
         } => {
             let ctx = context(&component)?;
-            let seller = read_key(&seller_key)?.for_listing(&hex_array(&commitment, "commitment")?);
+            let commitment: [u8; 64] = hex_array(&commitment, "commitment")?;
+            let seller = read_key(&seller_key)?.for_listing(&commitment);
             let block = read_block(&block)?;
-            let sealed = core::seal(&block, &hex32(&buyer_key, "buyer key")?, &ctx, &mut OsRng).map_err(describe)?;
+            if core::commitment_of(&block) != commitment {
+                return Err("--block is not the block of this listing (its commitment differs)".into());
+            }
+            if core::decode_plaintext(&block).is_err() {
+                return Err("--block is a block no client can decode: the dispute would rule Fraud".into());
+            }
+            let buyer_key = hex32(&buyer_key, "buyer key")?;
+            let buy = Proof {
+                c: hex32(&buy_c, "buy c")?,
+                z: hex32(&buy_z, "buy z")?,
+            };
+            if !core::verify_action(&buyer_key, &ctx, core::MSG_BUY, &buy) {
+                return Err("--buyer-key is not the buyer of this sale: its buy proof does not verify here".into());
+            }
+            let sealed = core::seal(&block, &buyer_key, &ctx, &mut OsRng).map_err(describe)?;
             let signature = core::prove_action(
                 &seller,
                 &ctx,
@@ -251,10 +280,17 @@ fn run(command: Command) -> Result<ExitCode, String> {
             base_key,
             component,
             ephemeral,
+            ciphertext,
+            commitment,
         } => {
             let ctx = context(&component)?;
             let key = read_key(&base_key)?.for_sale(&ctx);
             let ephemeral = hex32(&ephemeral, "ephemeral key")?;
+            let ciphertext: core::Block = hex_array(&ciphertext, "ciphertext")?;
+            let commitment: [u8; 64] = hex_array(&commitment, "commitment")?;
+            core::open_verified(&key, &ctx, &ephemeral, &ciphertext, &commitment)
+                .map(Zeroizing::new)
+                .map_err(|e| format!("refusing to accept: {}; dispute instead", describe(e)))?;
             print_proof(
                 "",
                 &core::prove_action(&key, &ctx, &core::msg_accept(&ephemeral), &mut OsRng),
@@ -389,7 +425,9 @@ fn write_private(path: &Path, contents: &str) -> Result<(), String> {
         options.mode(0o600);
     }
     let mut file = options.open(path).map_err(|e| io_error(path, &e))?;
-    file.write_all(contents.as_bytes()).map_err(|e| io_error(path, &e))
+    file.write_all(contents.as_bytes()).map_err(|e| io_error(path, &e))?;
+    // On disk before the caller reports the file as written and tells the user to back it up.
+    file.sync_all().map_err(|e| io_error(path, &e))
 }
 
 fn read_key(path: &Path) -> Result<Keypair, String> {
