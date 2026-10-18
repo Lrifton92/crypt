@@ -40,6 +40,8 @@ use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha512};
 use zeroize::{Zeroize, Zeroizing};
 
+pub mod rules;
+
 /// Size of every plaintext block, hence of every ciphertext. Fixed so a ciphertext says nothing about
 /// how long the secret is, and so the template's decryption cost is bounded.
 pub const PLAINTEXT_LEN: usize = 320;
@@ -337,7 +339,7 @@ pub fn keystream(context: &[u8], buyer_key: &[u8; 32], ephemeral: &[u8; 32], sha
     stream
 }
 
-fn xor(a: &Block, b: &Block) -> Block {
+pub(crate) fn xor(a: &Block, b: &Block) -> Block {
     let mut out = [0u8; PLAINTEXT_LEN];
     for ((o, x), y) in out.iter_mut().zip(a).zip(b) {
         *o = x ^ y;
