@@ -107,7 +107,7 @@ fn nothing_on_the_ledger_reveals_the_secret_and_no_account_appears_in_the_sale()
         SELLER_BOND,
         PRICE,
         BUYER_BOND,
-        (DELIVERY_WINDOW, DISPUTE_WINDOW),
+        (LISTING_WINDOW, DELIVERY_WINDOW, DISPUTE_WINDOW),
     );
     let result = run(&mut m, "list", tx);
     let crypt = result
@@ -515,25 +515,105 @@ fn listings_with_bad_terms_are_refused() {
     let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
     let commitment = Hash64::from(client::commitment_of(&block));
     let key = m.seller_key.public();
-    let w = (DELIVERY_WINDOW, DISPUTE_WINDOW);
-    let mut bad = |key: [u8; 32], price: u64, buyer_bond: u64, windows: (u64, u64), reason: &str| {
-        let tx = m.list_tx(commitment, key, SELLER_BOND, price, buyer_bond, windows);
+    let w = (LISTING_WINDOW, DELIVERY_WINDOW, DISPUTE_WINDOW);
+    let mut bad = |key: [u8; 32], bond: u64, price: u64, buyer_bond: u64, windows: (u64, u64, u64), reason: &str| {
+        let tx = m.list_tx(commitment, key, bond, price, buyer_bond, windows);
         assert_reject_reason(m.test.execute_expect_failure(tx, vec![]), reason);
     };
-    bad(key, 0, BUYER_BOND, w, "price must be positive");
-    bad(key, PRICE, 0, w, "buyer bond must be positive");
-    bad(key, PRICE, BUYER_BOND, (0, DISPUTE_WINDOW), "windows must be between");
-    bad(key, PRICE, BUYER_BOND, (2, DISPUTE_WINDOW), "windows must be between");
-    bad(key, PRICE, BUYER_BOND, (DELIVERY_WINDOW, 2), "windows must be between");
+    bad(key, SELLER_BOND, 0, BUYER_BOND, w, "price must be positive");
+    bad(key, SELLER_BOND, PRICE, 0, w, "buyer bond must be positive");
+    for windows in [
+        (LISTING_WINDOW, 0, DISPUTE_WINDOW),
+        (LISTING_WINDOW, 2, DISPUTE_WINDOW),
+        (LISTING_WINDOW, DELIVERY_WINDOW, 2),
+        (LISTING_WINDOW, 10_001, 10_001),
+        (2, DELIVERY_WINDOW, DISPUTE_WINDOW),
+        (10_001, DELIVERY_WINDOW, DISPUTE_WINDOW),
+    ] {
+        bad(key, SELLER_BOND, PRICE, BUYER_BOND, windows, "windows must be between");
+    }
+    // A bond too small to deter delivering noise, a buyer bond that turns a dispute into a trap, and a
+    // dispute window shorter than the time the buyer must already watch for a delivery.
     bad(
         key,
+        PRICE / 10 - 1,
         PRICE,
         BUYER_BOND,
-        (10_001, DISPUTE_WINDOW),
-        "windows must be between",
+        w,
+        "seller bond must be at least 10% of the price",
     );
-    bad([0u8; 32], PRICE, BUYER_BOND, w, "must not be the identity point");
-    bad([0xff; 32], PRICE, BUYER_BOND, w, "not a canonical Ristretto point");
+    bad(
+        key,
+        SELLER_BOND,
+        PRICE,
+        PRICE + 1,
+        w,
+        "buyer bond must not exceed the price",
+    );
+    bad(
+        key,
+        SELLER_BOND,
+        PRICE,
+        BUYER_BOND,
+        (LISTING_WINDOW, DISPUTE_WINDOW + 1, DISPUTE_WINDOW),
+        "the dispute window must be at least the delivery window",
+    );
+    bad(
+        [0u8; 32],
+        SELLER_BOND,
+        PRICE,
+        BUYER_BOND,
+        w,
+        "must not be the identity point",
+    );
+    bad(
+        [0xff; 32],
+        SELLER_BOND,
+        PRICE,
+        BUYER_BOND,
+        w,
+        "not a canonical Ristretto point",
+    );
+}
+
+#[test]
+fn terms_at_the_bounds_are_accepted() {
+    let mut m = Market::new();
+    let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+    let commitment = Hash64::from(client::commitment_of(&block));
+    let key = m.seller_key.public();
+    let tx = m.list_tx(commitment, key, PRICE / 10, PRICE, PRICE, (3, 3, 3));
+    m.test.execute_expect_success(tx, vec![]);
+}
+
+#[test]
+fn a_listing_cannot_be_bought_after_it_expires() {
+    // A seller who stopped watching must not lose their bond to whoever buys a stale listing and
+    // claims it undelivered (fourth review, F1).
+    let mut m = Market::new();
+    let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+    let late = m.list(&block);
+    m.epoch(START_EPOCH + LISTING_WINDOW + 1);
+    let ctx = context(late);
+    let sale_key = Keypair::generate(&mut OsRng).for_sale(&ctx);
+    let proof = client::prove_action(&sale_key, &ctx, client::MSG_BUY, &mut OsRng);
+    let tx = m.buy_tx(late, sale_key.public(), proof, PRICE + BUYER_BOND);
+    assert_reject_reason(m.test.execute_expect_failure(tx, vec![]), "listing expired");
+    assert_eq!(m.stage(late), "Listed");
+    // The seller can still take the bond back.
+    let args = m.cancel_args(late);
+    m.ok(late, "cancel", args);
+    assert_eq!(m.owed(late), (a(SELLER_BOND), Amount::zero()));
+}
+
+#[test]
+fn a_listing_can_be_bought_up_to_and_including_its_last_epoch() {
+    let mut m = Market::new();
+    let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+    let crypt = m.list(&block);
+    m.epoch(START_EPOCH + LISTING_WINDOW);
+    m.buy(crypt);
+    assert_eq!(m.stage(crypt), "Paid");
 }
 
 #[test]
@@ -554,6 +634,7 @@ fn a_token_the_seller_can_recall_is_refused() {
                 Hash64::from(client::commitment_of(&block)),
                 Amount::from_u64(PRICE),
                 Amount::from_u64(BUYER_BOND),
+                LISTING_WINDOW,
                 DELIVERY_WINDOW,
                 DISPUTE_WINDOW,
                 point(m.seller_key.public()),

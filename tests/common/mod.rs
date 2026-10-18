@@ -33,6 +33,7 @@ pub const SELLER_BOND: u64 = 300;
 pub const BUYER_BOND: u64 = 200;
 pub const DELIVERY_WINDOW: u64 = 3;
 pub const DISPUTE_WINDOW: u64 = 4;
+pub const LISTING_WINDOW: u64 = 5;
 pub const START_EPOCH: u64 = 10;
 pub const SECRET: &[u8] = b"vault combination: 31-04-77";
 
@@ -215,7 +216,7 @@ impl Market {
         bond: u64,
         price: u64,
         buyer_bond: u64,
-        windows: (u64, u64),
+        windows: (u64, u64, u64),
     ) -> Transaction {
         let coin = self.coin(bond);
         let template = self.test.get_template_address("Crypt");
@@ -232,6 +233,7 @@ impl Market {
                     Amount::from_u64(buyer_bond),
                     windows.0,
                     windows.1,
+                    windows.2,
                     point(seller_key),
                     Workspace("bond")
                 ],
@@ -246,7 +248,7 @@ impl Market {
             SELLER_BOND,
             PRICE,
             BUYER_BOND,
-            (DELIVERY_WINDOW, DISPUTE_WINDOW),
+            (LISTING_WINDOW, DELIVERY_WINDOW, DISPUTE_WINDOW),
         );
         let result = self.test.execute_expect_success(tx, vec![]);
         result
