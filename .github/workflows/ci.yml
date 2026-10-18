@@ -62,3 +62,5 @@ jobs:
         run: cargo test -p crypt --test end_to_end --locked
       - name: Play every attack
         run: cargo test -p crypt --test attacks --locked
+      - name: Check the demo's rules port against the template
+        run: cargo test -p crypt --test equivalence --locked
