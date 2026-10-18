@@ -50,6 +50,7 @@ test("a seller who delivers a fake is cursed", async ({ page }) => {
   await press(page, "DELIVER A FAKE");
   await expectVerdict(page, "YOU ARE CURSED", "THE FORGER'S CURSE", "0 / 150");
   await expect(page.locator(".dleq")).toContainText("DLEQ proof verified");
+  await expect(page.locator(".dleq a")).toHaveAttribute("href", /^https:\/\/explorer\.tari\.mw\/tx\/[0-9a-f]{64}$/);
   await expect(page.locator(".seals .nib.diff").first()).toBeVisible();
 });
 
@@ -102,6 +103,8 @@ test("the attacks board lists the threat model", async ({ page }) => {
   await press(page, "ATTACKS REPELLED");
   await expect(page.locator(".attack-group").first()).toBeVisible();
   expect(await page.locator(".attack-group li").count()).toBeGreaterThan(30);
+  // The two real esmeralda sales: the template, then 6 + 5 transactions, each linked.
+  expect(await page.locator(".onchain .steps a").count()).toBe(11);
   await noHorizontalScroll(page);
 });
 

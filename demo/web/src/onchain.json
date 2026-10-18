@@ -1,5 +1,91 @@
 {
   "network": "esmeralda",
-  "template": null,
-  "sales": {}
+  "explorer": "https://explorer.tari.mw",
+  "template": {
+    "address": "template_b7282faa09858bc1ca1257734d5e2739135c7ed29edec8a51d6b86d8225a61bf",
+    "url": "https://explorer.tari.mw/template/b7282faa09858bc1ca1257734d5e2739135c7ed29edec8a51d6b86d8225a61bf",
+    "sha256": "9430bd57a58dc7a7be31972a57fff2de46fbfb9a39176f05118d4cedf0efe34b",
+    "tx": "6341ce51e6f1b31b694364dc4ec761dc780dccef294a03fadd65264f1530c7b2",
+    "tx_url": "https://explorer.tari.mw/tx/6341ce51e6f1b31b694364dc4ec761dc780dccef294a03fadd65264f1530c7b2",
+    "commit": "320ffad"
+  },
+  "honest": {
+    "component": "component_4e37f76b091bf0d5ea6560e2bb73adb08522dfd20ee3b13bd8e170e055733a8a",
+    "component_url": "https://explorer.tari.mw/substate/component_4e37f76b091bf0d5ea6560e2bb73adb08522dfd20ee3b13bd8e170e055733a8a",
+    "steps": [
+      {
+        "step": "list",
+        "tx": "0d63f5c18883f4bf5df70a3ddb2b820bb08d0b4bbd00f1fa41e72ea6c787f085",
+        "url": "https://explorer.tari.mw/tx/0d63f5c18883f4bf5df70a3ddb2b820bb08d0b4bbd00f1fa41e72ea6c787f085"
+      },
+      {
+        "step": "buy",
+        "tx": "423eb76f8ccff76fb6c0cbf3f39a3c1de33f843192707deb19825ee39fb22362",
+        "url": "https://explorer.tari.mw/tx/423eb76f8ccff76fb6c0cbf3f39a3c1de33f843192707deb19825ee39fb22362"
+      },
+      {
+        "step": "deliver",
+        "tx": "cfb1cbba2a6c5381f0bc715dfd42f14c890f722160196537348036e555a2ac61",
+        "url": "https://explorer.tari.mw/tx/cfb1cbba2a6c5381f0bc715dfd42f14c890f722160196537348036e555a2ac61"
+      },
+      {
+        "step": "accept",
+        "tx": "ddef75bde116908b339c20aaee5b69936b6663300d1f7fb20cb0165ee1cc4cc6",
+        "url": "https://explorer.tari.mw/tx/ddef75bde116908b339c20aaee5b69936b6663300d1f7fb20cb0165ee1cc4cc6"
+      },
+      {
+        "step": "pay_seller",
+        "tx": "5950ca94158c804a433bb7afcee1ad21e165fb409203f336f784fe6d2fed61da",
+        "url": "https://explorer.tari.mw/tx/5950ca94158c804a433bb7afcee1ad21e165fb409203f336f784fe6d2fed61da"
+      },
+      {
+        "step": "pay_buyer",
+        "tx": "1fddca4337b790844d1ddc54dee5c713e30444baa0dcfeb960320096e95373d8",
+        "url": "https://explorer.tari.mw/tx/1fddca4337b790844d1ddc54dee5c713e30444baa0dcfeb960320096e95373d8"
+      }
+    ]
+  },
+  "fraud": {
+    "component": "component_9ceea34fb63c019e849c3d29cb9ac77d3c8ada043b59fea0066a87ba99cc84f8",
+    "component_url": "https://explorer.tari.mw/substate/component_9ceea34fb63c019e849c3d29cb9ac77d3c8ada043b59fea0066a87ba99cc84f8",
+    "steps": [
+      {
+        "step": "list",
+        "tx": "4542ee201d42989a6ae2bdcb67183031273ce949624b4efce76d67438ea3f099",
+        "url": "https://explorer.tari.mw/tx/4542ee201d42989a6ae2bdcb67183031273ce949624b4efce76d67438ea3f099"
+      },
+      {
+        "step": "buy",
+        "tx": "6906f4cc68c6f43bb3881a1c0baed53b0b34b9206c1c6e8295232e67af0e8b0e",
+        "url": "https://explorer.tari.mw/tx/6906f4cc68c6f43bb3881a1c0baed53b0b34b9206c1c6e8295232e67af0e8b0e"
+      },
+      {
+        "step": "deliver",
+        "tx": "3e070f69f0075c1de731e37c14774e06954a8da37cb2fb63239a1860e1ff6aa2",
+        "url": "https://explorer.tari.mw/tx/3e070f69f0075c1de731e37c14774e06954a8da37cb2fb63239a1860e1ff6aa2"
+      },
+      {
+        "step": "dispute",
+        "tx": "7e3e2f1271cf2669a34ee0084931216e0f4abb02764aed349ad50c779c6ec59a",
+        "url": "https://explorer.tari.mw/tx/7e3e2f1271cf2669a34ee0084931216e0f4abb02764aed349ad50c779c6ec59a"
+      },
+      {
+        "step": "pay_buyer",
+        "tx": "c0deacb7b6175c74a9e753ff4ea9fae0a381e86ec34f7608867c7a9a1583cb21",
+        "url": "https://explorer.tari.mw/tx/c0deacb7b6175c74a9e753ff4ea9fae0a381e86ec34f7608867c7a9a1583cb21"
+      }
+    ]
+  },
+  "sales": {
+    "Accepted": {
+      "step": "accept",
+      "tx": "ddef75bde116908b339c20aaee5b69936b6663300d1f7fb20cb0165ee1cc4cc6",
+      "url": "https://explorer.tari.mw/tx/ddef75bde116908b339c20aaee5b69936b6663300d1f7fb20cb0165ee1cc4cc6"
+    },
+    "Fraud": {
+      "step": "dispute",
+      "tx": "7e3e2f1271cf2669a34ee0084931216e0f4abb02764aed349ad50c779c6ec59a",
+      "url": "https://explorer.tari.mw/tx/7e3e2f1271cf2669a34ee0084931216e0f4abb02764aed349ad50c779c6ec59a"
+    }
+  }
 }

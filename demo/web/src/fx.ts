@@ -205,7 +205,10 @@ function drawBackground(t: number): void {
   // The crypt's door flickers green.
   bctx.globalAlpha = 0.25 + Math.sin(s * 2.2) * 0.12 + (Math.sin(s * 17) > 0.9 ? 0.15 : 0);
   bctx.fillStyle = "#2f8f4a";
-  bctx.fillRect(crypt.x - 8 + shift - 3, crypt.y - 10, 6, 11);
+  const door = crypt.x - 8 + shift;
+  bctx.fillRect(door - 1, crypt.y - 11, 2, 1);
+  bctx.fillRect(door - 2, crypt.y - 10, 4, 1);
+  bctx.fillRect(door - 3, crypt.y - 9, 6, 10);
   bctx.globalAlpha = 1;
   // Bats.
   for (const b of bats) {

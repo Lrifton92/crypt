@@ -1227,6 +1227,28 @@ h3 {
   to { opacity: 1; transform: rotate(-6deg) scale(1); }
 }
 
+.onchain li {
+  grid-template-columns: 1fr;
+}
+
+.onchain li > :not(.stamp) {
+  grid-column: 1;
+  justify-self: start;
+}
+
+.onchain a {
+  word-break: break-all;
+}
+
+.onchain-lead {
+  margin: 0 0 12px;
+  color: var(--muted);
+}
+
+.steps a {
+  color: var(--spectre);
+}
+
 /* ---------- Small screens ---------- */
 
 @media (max-width: 560px) {

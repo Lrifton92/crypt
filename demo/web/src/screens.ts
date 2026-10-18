@@ -45,6 +45,16 @@ const GHOST_SECRETS = [
 ];
 const GHOST_FAKES = ["boo. there is no secret.", "this is definitely the secret (it is not)", "lol. nothing. enjoy."];
 
+interface OnchainStep { step: string; tx: string; url: string }
+interface OnchainSale { component: string; component_url: string; steps: OnchainStep[] }
+interface Onchain {
+  template: { address: string; url: string; sha256: string; tx_url: string; commit: string } | null;
+  honest?: OnchainSale;
+  fraud?: OnchainSale;
+  sales: { Accepted?: OnchainStep; Fraud?: OnchainStep };
+}
+const ONCHAIN = onchain as unknown as Onchain;
+
 const app = () => document.getElementById("app")!;
 let run = 0;
 
@@ -588,14 +598,22 @@ async function verdict(role: Role, ending: Ending, sale: Sale): Promise<void> {
   const buyerFig = h("figure", { class: "winner buyer" }, strip([role === "buyer" ? BUYER : GHOST_A], "actor-sprite"), h("figcaption", {}, role === "buyer" ? "YOU · BUYER" : "GHOST · BUYER"), h("b", { class: "owed" }, "+0"));
   const mark = sprite(cursed ? SKULL : CHEST, `mark ${mood}`);
   const head = h("h1", { class: `headline ${mood}`, "data-text": headline, tabindex: "-1" }, headline);
-  const dleq = h(
-    "p",
-    { class: "dleq" },
-    "✓ DLEQ proof verified: same check as the contract",
-  );
-  const sales = (onchain as { sales: Record<string, { tx: string; url: string } | null> }).sales;
-  const link = sales[ending] ?? null;
-  if (link) dleq.append(" · ", h("a", { href: link.url, target: "_blank", rel: "noopener" }, "see it verified on-chain"));
+  // Dispute verdicts carry the DLEQ line; every verdict links the real esmeralda sale it mirrors.
+  const dleq = h("p", { class: "dleq" }, isDispute ? "✓ DLEQ proof verified: same check as the contract" : "");
+  const real =
+    ending === "Fraud"
+      ? [ONCHAIN.sales.Fraud, "see this verdict on-chain"]
+      : ending === "DisputeRejected"
+        ? [ONCHAIN.sales.Fraud, "see a DLEQ proof verified on-chain"]
+        : ending === "Accepted" || ending === "Uncontested"
+          ? [ONCHAIN.sales.Accepted, "an honest sale, accepted on-chain on esmeralda"]
+          : [undefined, ""];
+  const [realStep, realLabel] = real as [OnchainStep | undefined, string];
+  if (realStep) {
+    if (isDispute) dleq.append(" · ");
+    else dleq.append("Played for real: ");
+    dleq.append(h("a", { href: realStep.url, target: "_blank", rel: "noopener" }, realLabel));
+  }
 
   const checked = h("dl", {});
   const add = (label: string, value: string | undefined, note = "") => value && checked.append(fact(label, value, note));
@@ -634,7 +652,7 @@ async function verdict(role: Role, ending: Ending, sale: Sale): Promise<void> {
     h("p", { class: "story" }, story(role, ending)),
     contents,
     seals,
-    isDispute ? dleq : null,
+    dleq.childNodes.length ? dleq : null,
     h("details", { class: "checked pbox" }, h("summary", {}, "WHAT THE CONTRACT CHECKED"), checked),
     actions,
   );
@@ -669,7 +687,7 @@ async function verdict(role: Role, ending: Ending, sale: Sale): Promise<void> {
   play(cursed ? "curse" : "justice");
   if (cursed) document.body.classList.add("shake");
   window.setTimeout(() => document.body.classList.remove("shake"), 500);
-  if (isDispute) dleq.classList.remove("hidden");
+  dleq.classList.remove("hidden");
   await sleep(500);
   if (!alive()) return;
 
@@ -713,6 +731,7 @@ async function board(): Promise<void> {
         h("img", { src: `${REPO}/actions/workflows/ci.yml/badge.svg`, alt: "CI status", class: "ci-badge" }),
       ),
     ),
+    onchainBoard(),
     ...groups.map((g) =>
       h(
         "div",
@@ -745,4 +764,38 @@ async function board(): Promise<void> {
     h("div", { class: "row" }, button("PLAY", () => void choose(), "btn-big"), button("TITLE", () => void title(), "btn-ghost btn-small")),
   );
   await mount(screen);
+}
+
+/** The two sales played for real on esmeralda, every transaction linked to the explorer. */
+function onchainBoard(): HTMLElement | null {
+  const t = ONCHAIN.template;
+  if (!t || !ONCHAIN.honest || !ONCHAIN.fraud) return null;
+  const link = (url: string, text: string) => h("a", { href: url, target: "_blank", rel: "noopener" }, text);
+  const sale = (title: string, s: OnchainSale) =>
+    h(
+      "li",
+      {},
+      h("b", {}, title),
+      h("span", { class: "steps" }, ...s.steps.flatMap((step, i) => [i ? " → " : "", link(step.url, step.step)])),
+      h("small", {}, link(s.component_url, s.component)),
+    );
+  return h(
+    "div",
+    { class: "attack-group onchain pbox" },
+    h("h3", {}, "PLAYED FOR REAL ON ESMERALDA"),
+    h(
+      "p",
+      { class: "onchain-lead" },
+      "The same contract, published on the Tari Ootle testnet, with two real sales. Every step links to the ",
+      link("https://explorer.tari.mw", "Veil explorer"),
+      ".",
+    ),
+    h(
+      "ul",
+      {},
+      h("li", {}, h("b", {}, "Template"), link(t.url, t.address), h("small", {}, "published from commit ", t.commit, " · wasm sha256 ", t.sha256, " · ", link(t.tx_url, "publish tx"))),
+      sale("An honest sale, accepted, both sides paid", ONCHAIN.honest),
+      sale("A fake delivery, disputed: the template decrypted it, ruled Fraud, paid the buyer everything", ONCHAIN.fraud),
+    ),
+  );
 }
