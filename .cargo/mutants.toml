@@ -1,0 +1,3 @@
+# The one equivalent mutant: Keypair's Drop only wipes memory, which no safe test can observe.
+# See docs/notes-mutants.md.
+exclude_re = ["impl Drop for Keypair"]
