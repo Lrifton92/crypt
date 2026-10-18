@@ -1,0 +1,295 @@
+[
+  {
+    "section": "Seller attacks",
+    "rows": [
+      {
+        "attack": "Deliver a different secret",
+        "defence": "Dispute: the template decrypts and re-hashes; mismatch = Fraud",
+        "tests": [
+          "a_seller_who_delivers_something_else_loses_the_sale_and_the_bond"
+        ]
+      },
+      {
+        "attack": "Commit to a block no client can decode, deliver it faithfully",
+        "defence": "Dispute also checks the block layout",
+        "tests": [
+          "committing_to_an_undecodable_block_loses_the_dispute",
+          "a_length_field_past_the_block_loses_the_dispute"
+        ]
+      },
+      {
+        "attack": "Deliver noise",
+        "defence": "Nothing decrypts to the commitment",
+        "tests": [
+          "noise_loses_the_dispute",
+          "random_deliveries_always_lose_the_dispute"
+        ]
+      },
+      {
+        "attack": "Repost another sale's R (or λ·R + k·G) so the buyer's dispute leaks that sale",
+        "defence": "deliver requires a proof of knowledge of r, bound to the sale; a dispute then only publishes r·B', which the seller already knew",
+        "tests": [
+          "another_sales_ephemeral_key_cannot_be_reposted_to_extract_its_secret",
+          "a_dispute_reveals_nothing_the_seller_did_not_already_know",
+          "a_block_sealed_for_another_sale_is_refused_at_delivery"
+        ]
+      },
+      {
+        "attack": "List in a token they can recall or freeze, then drain or lock the escrow",
+        "defence": "XTM only",
+        "tests": [
+          "a_token_the_seller_can_recall_is_refused"
+        ]
+      },
+      {
+        "attack": "Never deliver, keep the buyer's funds locked",
+        "defence": "Delivery deadline; the buyer is owed everything, seller bond included",
+        "tests": [
+          "no_delivery_returns_everything_to_the_buyer",
+          "delivery_is_open_up_to_and_including_the_deadline_only"
+        ]
+      },
+      {
+        "attack": "Squeeze the buyer's time to check and dispute",
+        "defence": "Windows of at least 3 epochs",
+        "tests": [
+          "listings_with_bad_terms_are_refused"
+        ]
+      },
+      {
+        "attack": "Cash in before the buyer can dispute",
+        "defence": "claim_uncontested and payouts only after settlement",
+        "tests": [
+          "the_seller_cannot_cash_in_before_the_dispute_window_closes"
+        ]
+      },
+      {
+        "attack": "Malformed delivery (identity / non-canonical R, wrong length)",
+        "defence": "Refused",
+        "tests": [
+          "malformed_deliveries_are_refused"
+        ]
+      },
+      {
+        "attack": "Cancel after being paid, or replay a cancellation",
+        "defence": "Listed-only, proof bound to the sale and the action",
+        "tests": [
+          "cancellation_needs_the_seller_key_and_an_unsold_listing"
+        ]
+      },
+      {
+        "attack": "Bad terms (zero price or bond, windows out of range, invalid key)",
+        "defence": "Refused at list",
+        "tests": [
+          "listings_with_bad_terms_are_refused"
+        ]
+      },
+      {
+        "attack": "A tiny seller bond against a high price, so delivering noise to an inattentive buyer pays off",
+        "defence": "The seller bond must be at least 10% of the price",
+        "tests": [
+          "listings_with_bad_terms_are_refused",
+          "terms_at_the_bounds_are_accepted"
+        ]
+      },
+      {
+        "attack": "A long delivery window and a short dispute window, so noise lands when the buyer is away",
+        "defence": "The dispute window must be at least the delivery window",
+        "tests": [
+          "listings_with_bad_terms_are_refused"
+        ]
+      },
+      {
+        "attack": "A buyer bond above the price, turning any dispute into a trap for the buyer",
+        "defence": "The buyer bond must not exceed the price",
+        "tests": [
+          "listings_with_bad_terms_are_refused"
+        ]
+      },
+      {
+        "attack": "Change the rules to lock the buyer out of dispute",
+        "defence": "No owner (OwnerRule::None)",
+        "tests": []
+      },
+      {
+        "attack": "List a clone of a real listing (same commitment and seller key) at a price of 1, then get the real seller to deliver to it",
+        "defence": "list requires a proof by the seller key over every term (msg_list): a clone must copy the exact price, bonds and windows, so it pays the real price",
+        "tests": [
+          "a_listing_cannot_reuse_another_sellers_key",
+          "a_list_proof_is_bound_to_its_terms",
+          "a_list_proof_covers_every_term"
+        ]
+      }
+    ]
+  },
+  {
+    "section": "Buyer attacks",
+    "rows": [
+      {
+        "attack": "Claim fraud with a made-up S, a proof for another key, a bent or swapped proof, zero scalars",
+        "defence": "DLEQ verified on-chain against the registered sale key",
+        "tests": [
+          "a_buyer_cannot_fake_a_fraud",
+          "random_dispute_attempts_never_succeed"
+        ]
+      },
+      {
+        "attack": "Non-canonical scalars (malleability), degenerate points",
+        "defence": "Canonical scalars, canonical non-identity points",
+        "tests": [
+          "a_buyer_cannot_fake_a_fraud"
+        ]
+      },
+      {
+        "attack": "Replay a dispute proof from another sale",
+        "defence": "Challenge binds the component address",
+        "tests": [
+          "a_dispute_proof_cannot_be_replayed_into_another_sale"
+        ]
+      },
+      {
+        "attack": "Read the secret, then dispute to be refunded",
+        "defence": "The honest delivery decrypts to the commitment: DisputeRejected, bond lost",
+        "tests": [
+          "a_false_dispute_pays_the_seller_and_costs_the_buyer_the_bond"
+        ]
+      },
+      {
+        "attack": "Dispute after the window",
+        "defence": "Refused; the last epoch is still open",
+        "tests": [
+          "the_dispute_window_includes_its_last_epoch_and_nothing_after"
+        ]
+      },
+      {
+        "attack": "Underpay or overpay",
+        "defence": "Exactly price + bond",
+        "tests": [
+          "payment_must_be_exact"
+        ]
+      },
+      {
+        "attack": "Pay in another token",
+        "defence": "XTM only",
+        "tests": [
+          "payment_in_another_token_is_refused"
+        ]
+      },
+      {
+        "attack": "Register a key they do not hold, or the base key in place of the sale key",
+        "defence": "Proof by the registered key, bound to the sale",
+        "tests": [
+          "a_buy_proof_is_bound_to_the_key_and_the_sale"
+        ]
+      },
+      {
+        "attack": "Buy a listing its seller stopped watching, then claim it undelivered to take the bond",
+        "defence": "Listings expire: buy is refused after the listing window; the seller can still cancel",
+        "tests": [
+          "a_listing_cannot_be_bought_after_it_expires",
+          "a_listing_can_be_bought_up_to_and_including_its_last_epoch"
+        ]
+      }
+    ]
+  },
+  {
+    "section": "Payouts",
+    "rows": [
+      {
+        "attack": "Collect someone else's share, or the other side's",
+        "defence": "Payout signed by the payee's key, per action",
+        "tests": [
+          "a_payout_must_be_signed_by_its_payee"
+        ]
+      },
+      {
+        "attack": "Swap the outputs of a signed payout (mempool)",
+        "defence": "The signature covers the digest of the whole canonical transfer",
+        "tests": [
+          "a_signed_payout_cannot_be_redirected"
+        ]
+      },
+      {
+        "attack": "Take more or less than owed",
+        "defence": "revealed_amount must equal what is owed",
+        "tests": [
+          "a_payout_spends_exactly_what_is_owed_into_stealth_outputs_only"
+        ]
+      },
+      {
+        "attack": "Reveal part of a payout to someone else",
+        "defence": "No revealed output; stealth outputs only",
+        "tests": [
+          "a_payout_spends_exactly_what_is_owed_into_stealth_outputs_only"
+        ]
+      },
+      {
+        "attack": "Mix outside coins or covenant claims into a payout",
+        "defence": "No stealth inputs, no covenant claims",
+        "tests": [
+          "a_payout_cannot_carry_other_stealth_inputs",
+          "a_payout_carries_no_covenant_claims"
+        ]
+      },
+      {
+        "attack": "Collect twice, or after losing",
+        "defence": "Owed amount zeroed before the transfer; nothing owed to the losing side",
+        "tests": [
+          "each_payout_happens_once",
+          "a_payout_happens_once_even_inside_one_transaction",
+          "the_loser_gets_nothing",
+          "nothing_is_owed_to_a_buyer_who_never_was"
+        ]
+      },
+      {
+        "attack": "Get a payee to sign a transfer to someone else (a fake helper, a compromised wallet)",
+        "defence": "The CLI signs only transfers the template accepts for exactly --owed, and prints every output and its spend authorisation first; the payee must still check the outputs are theirs",
+        "tests": [
+          "payout_signs_only_a_transfer_the_template_would_accept"
+        ]
+      },
+      {
+        "attack": "Client and template disagree on the digest",
+        "defence": "Both decode and re-encode the transfer before hashing",
+        "tests": [
+          "the_template_and_the_client_digest_a_payout_identically"
+        ]
+      }
+    ]
+  },
+  {
+    "section": "Third parties and hostile components",
+    "rows": [
+      {
+        "attack": "Accept, cancel, deliver or take a payout for a party, from a hostile component in that party's own transaction",
+        "defence": "Actions need the party's Crypt key, not the signer",
+        "tests": [
+          "a_hostile_component_in_the_victims_transaction_cannot_act_for_them"
+        ]
+      },
+      {
+        "attack": "Accept with any key but the buyer's sale key, another action, another sale, another delivery",
+        "defence": "Proof bound to key, action, sale and R",
+        "tests": [
+          "only_the_buyer_sale_key_can_accept_and_only_this_delivery",
+          "random_action_proofs_never_authorize_anything"
+        ]
+      },
+      {
+        "attack": "Deliver without the seller key, or reuse a delivery signature on other content",
+        "defence": "Proof covers R and the ciphertext",
+        "tests": [
+          "only_the_seller_key_can_deliver",
+          "a_delivery_signature_does_not_cover_other_content"
+        ]
+      },
+      {
+        "attack": "Buy a listing twice",
+        "defence": "One sale per listing",
+        "tests": [
+          "a_listing_sells_once_and_a_replayed_buy_is_refused"
+        ]
+      }
+    ]
+  }
+]

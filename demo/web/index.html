@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0b0712" />
+    <title>Crypt · the cursed crypt</title>
+    <meta name="description" content="Sell a secret on the Tari Ootle. Cheat, and the crypt curses you. A playable demo running the real Crypt client code in your browser." />
+    <meta property="og:title" content="Crypt · the cursed crypt" />
+    <meta property="og:description" content="Sell a secret. Nobody judges but the crypt. Play both sides, honest or cheating." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8' shape-rendering='crispEdges'%3E%3Cpath fill='%23ff8a1f' d='M2 1h4v1h1v4h-1v1h-4v-1h-1v-4h1z'/%3E%3Cpath fill='%231a0f2e' d='M2 3h1v1h-1zM5 3h1v1h-1zM3 5h2v1h-2z'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <canvas id="bg" aria-hidden="true"></canvas>
+    <main id="app">
+      <section id="boot" class="screen boot">
+        <h1 class="boot-title">SUMMONING THE CRYPT</h1>
+        <div class="boot-bar" aria-hidden="true"><span></span></div>
+        <p>Loading the crypt engine: the real client cryptography, compiled to WebAssembly.</p>
+        <noscript><p>The crypt needs JavaScript to open.</p></noscript>
+      </section>
+    </main>
+    <canvas id="fx" aria-hidden="true"></canvas>
+    <div class="crt" aria-hidden="true"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
