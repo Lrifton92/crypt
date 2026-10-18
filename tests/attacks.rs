@@ -101,9 +101,11 @@ fn nothing_on_the_ledger_reveals_the_secret_and_no_account_appears_in_the_sale()
         result
     };
 
+    let seller = copy_key(&m.seller_key);
     let tx = m.list_tx(
         Hash64::from(client::commitment_of(&block)),
-        m.seller_key.public(),
+        seller.public(),
+        &seller,
         SELLER_BOND,
         PRICE,
         BUYER_BOND,
@@ -514,10 +516,11 @@ fn listings_with_bad_terms_are_refused() {
     let mut m = Market::new();
     let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
     let commitment = Hash64::from(client::commitment_of(&block));
-    let key = m.seller_key.public();
+    let seller = copy_key(&m.seller_key);
+    let key = seller.public();
     let w = (LISTING_WINDOW, DELIVERY_WINDOW, DISPUTE_WINDOW);
     let mut bad = |key: [u8; 32], bond: u64, price: u64, buyer_bond: u64, windows: (u64, u64, u64), reason: &str| {
-        let tx = m.list_tx(commitment, key, bond, price, buyer_bond, windows);
+        let tx = m.list_tx(commitment, key, &seller, bond, price, buyer_bond, windows);
         assert_reject_reason(m.test.execute_expect_failure(tx, vec![]), reason);
     };
     bad(key, SELLER_BOND, 0, BUYER_BOND, w, "price must be positive");
@@ -581,9 +584,76 @@ fn terms_at_the_bounds_are_accepted() {
     let mut m = Market::new();
     let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
     let commitment = Hash64::from(client::commitment_of(&block));
-    let key = m.seller_key.public();
-    let tx = m.list_tx(commitment, key, PRICE / 10, PRICE, PRICE, (3, 3, 3));
+    let seller = copy_key(&m.seller_key);
+    let tx = m.list_tx(
+        commitment,
+        seller.public(),
+        &seller,
+        PRICE / 10,
+        PRICE,
+        PRICE,
+        (3, 3, 3),
+    );
     m.test.execute_expect_success(tx, vec![]);
+}
+
+#[test]
+fn a_listing_cannot_reuse_another_sellers_key() {
+    // Mallory copies a real listing's commitment and seller key at a price of 1, buys her clone and
+    // asks the seller to deliver to it: the seller's key would sign a delivery for almost nothing
+    // (fourth review, T1). Listing now takes a proof by the seller key over every term.
+    let mut m = Market::new();
+    let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+    let commitment = Hash64::from(client::commitment_of(&block));
+    m.list(&block);
+    let victim = m.seller_key.public();
+    let mallory = Keypair::generate(&mut OsRng);
+    let tx = m.list_tx(commitment, victim, &mallory, 1, 1, 1, (3, 3, 3));
+    assert_reject_reason(m.test.execute_expect_failure(tx, vec![]), "invalid seller proof");
+}
+
+#[test]
+fn a_list_proof_is_bound_to_its_terms() {
+    // A proof the seller made for one set of terms cannot list another (here: a lower price).
+    let mut m = Market::new();
+    let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+    let commitment = client::commitment_of(&block);
+    let seller = copy_key(&m.seller_key);
+    let honest = client::msg_list(
+        &commitment,
+        u128::from(PRICE),
+        u128::from(BUYER_BOND),
+        u128::from(SELLER_BOND),
+        LISTING_WINDOW,
+        DELIVERY_WINDOW,
+        DISPUTE_WINDOW,
+    );
+    let proof = client::prove_action(&seller, client::LIST_CONTEXT, &honest, &mut OsRng);
+    let coin = m.coin(SELLER_BOND);
+    let template = m.test.get_template_address("Crypt");
+    let tx = m
+        .test
+        .transaction()
+        .stealth_transfer(TARI_TOKEN, coin.spend_to_bucket())
+        .put_last_instruction_output_on_workspace("bond")
+        .call_function(
+            template,
+            "list",
+            args![
+                Hash64::from(commitment),
+                Amount::from_u64(PRICE - 1),
+                Amount::from_u64(BUYER_BOND),
+                LISTING_WINDOW,
+                DELIVERY_WINDOW,
+                DISPUTE_WINDOW,
+                point(seller.public()),
+                scalar(proof.c),
+                scalar(proof.z),
+                Workspace("bond")
+            ],
+        )
+        .build_and_seal(coin.key());
+    assert_reject_reason(m.test.execute_expect_failure(tx, vec![]), "invalid seller proof");
 }
 
 #[test]
@@ -638,6 +708,8 @@ fn a_token_the_seller_can_recall_is_refused() {
                 DELIVERY_WINDOW,
                 DISPUTE_WINDOW,
                 point(m.seller_key.public()),
+                scalar([0u8; 32]),
+                scalar([0u8; 32]),
                 Workspace("bond")
             ],
         )
