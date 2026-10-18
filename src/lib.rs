@@ -81,6 +81,11 @@ const MSG_CANCEL: &[u8] = b"cancel";
 const MSG_EPHEMERAL: &[u8] = b"ephemeral";
 const MSG_PAY_SELLER: &[u8] = b"pay_seller";
 const MSG_PAY_BUYER: &[u8] = b"pay_buyer";
+const MSG_DELIVER: &[u8] = b"deliver";
+const MSG_ACCEPT: &[u8] = b"accept";
+const MSG_LIST: &[u8] = b"list";
+/// Context of the seller's proof at `list`, before the component (and its address) exists.
+const LIST_CONTEXT: &[u8] = b"listing";
 
 fn len_prefix(data: &[u8]) -> [u8; 8] {
     (data.len() as u64).to_le_bytes()
@@ -274,6 +279,9 @@ mod crypt {
         buyer_bond: Amount,
         delivery_window: u64,
         dispute_window: u64,
+        /// Last epoch `buy` is accepted: a seller who stopped watching cannot lose the bond to a
+        /// stale purchase claimed undelivered.
+        listing_deadline: u64,
         delivery_deadline: Option<u64>,
         dispute_deadline: Option<u64>,
         /// `R`, posted with the delivery.
@@ -291,33 +299,64 @@ mod crypt {
     impl Crypt {
         /// Lists a secret for sale. `seller_bond` (revealed XTM) goes into escrow now and is lost to
         /// the buyer if the seller never delivers or delivers something other than `commitment`.
+        /// `(c, z)` is a proof by `seller_key` over every term, so nobody can list with another
+        /// seller's key on other terms.
         #[allow(clippy::too_many_arguments)]
         pub fn list(
             commitment: Hash64,
             price: Amount,
             buyer_bond: Amount,
+            listing_window: u64,
             delivery_window: u64,
             dispute_window: u64,
             seller_key: RistrettoPublicKeyBytes,
+            c: Scalar32Bytes,
+            z: Scalar32Bytes,
             seller_bond: Bucket,
         ) -> Component<Self> {
             assert!(price.is_positive(), "price must be positive");
             assert!(buyer_bond.is_positive(), "buyer bond must be positive");
             assert!(
-                (MIN_WINDOW..=MAX_WINDOW).contains(&delivery_window)
-                    && (MIN_WINDOW..=MAX_WINDOW).contains(&dispute_window),
+                [listing_window, delivery_window, dispute_window]
+                    .iter()
+                    .all(|w| (MIN_WINDOW..=MAX_WINDOW).contains(w)),
                 "windows must be between {} and {} epochs",
                 MIN_WINDOW,
                 MAX_WINDOW
             );
+            // The buyer already watches for a delivery during the whole delivery window; a shorter
+            // dispute window after it would let a seller time noise for when the buyer is away.
+            assert!(
+                dispute_window >= delivery_window,
+                "the dispute window must be at least the delivery window"
+            );
+            // A buyer bond above the price turns any dispute into a trap for the buyer.
+            assert!(buyer_bond <= price, "buyer bond must not exceed the price");
             // A token whose issuer keeps recall, freeze or an authorization hook could empty or lock
             // the escrow, and a template cannot read those rules. Native XTM has none of them.
             assert!(seller_bond.resource_address() == TARI_TOKEN, "only XTM is accepted");
-            assert!(seller_bond.amount().is_positive(), "seller bond must be positive");
+            let bond = seller_bond.amount();
+            assert!(bond.is_positive(), "seller bond must be positive");
+            // Below this, delivering noise to an inattentive buyer pays off for the seller.
+            assert!(
+                bond * Amount::from_u64(10) >= price,
+                "seller bond must be at least 10% of the price"
+            );
             assert_valid_point(&seller_key, "seller key");
+            let terms = [
+                MSG_LIST,
+                commitment.as_ref(),
+                &price.to_u128().to_le_bytes(),
+                &buyer_bond.to_u128().to_le_bytes(),
+                &bond.to_u128().to_le_bytes(),
+                &listing_window.to_le_bytes(),
+                &delivery_window.to_le_bytes(),
+                &dispute_window.to_le_bytes(),
+            ]
+            .concat();
+            assert_authorized(LIST_CONTEXT, &seller_key, &terms, &c, &z, "seller");
 
             let escrow = Vault::new_empty(TARI_TOKEN);
-            let bond = seller_bond.amount();
             escrow.deposit(seller_bond);
 
             Component::new(Self {
@@ -329,6 +368,7 @@ mod crypt {
                 buyer_bond,
                 delivery_window,
                 dispute_window,
+                listing_deadline: Consensus::current_epoch() + listing_window,
                 delivery_deadline: None,
                 dispute_deadline: None,
                 ephemeral: None,
@@ -349,6 +389,7 @@ mod crypt {
         /// over `"buy"`, bound to this sale: the buyer holds the key the secret will be sealed to.
         pub fn buy(&mut self, buyer_key: RistrettoPublicKeyBytes, c: Scalar32Bytes, z: Scalar32Bytes, payment: Bucket) {
             assert!(self.stage == Stage::Listed, "not for sale");
+            assert!(Consensus::current_epoch() <= self.listing_deadline, "listing expired");
             assert_valid_point(&buyer_key, "buyer key");
             assert_authorized(&Self::context(), &buyer_key, MSG_BUY, &c, &z, "buyer");
 
@@ -388,7 +429,7 @@ mod crypt {
             );
             let context = Self::context();
             assert_authorized(&context, &ephemeral, MSG_EPHEMERAL, &rc, &rz, "ephemeral");
-            let message = [b"deliver".as_slice(), ephemeral.as_bytes(), &ciphertext].concat();
+            let message = [MSG_DELIVER, ephemeral.as_bytes(), &ciphertext].concat();
             assert_authorized(&context, &self.seller_key, &message, &c, &z, "seller");
 
             self.ephemeral = Some(ephemeral);
@@ -402,7 +443,7 @@ mod crypt {
         /// buyer's sale key over `"accept" || R`, so it can only accept this delivery.
         pub fn accept(&mut self, c: Scalar32Bytes, z: Scalar32Bytes) {
             assert!(self.stage == Stage::Delivered, "nothing to accept");
-            let message = [b"accept".as_slice(), self.ephemeral.unwrap().as_bytes()].concat();
+            let message = [MSG_ACCEPT, self.ephemeral.unwrap().as_bytes()].concat();
             assert_authorized(&Self::context(), &self.buyer_key.unwrap(), &message, &c, &z, "buyer");
             self.settle(Outcome::Accepted);
         }
@@ -528,6 +569,10 @@ mod crypt {
             )
         }
 
+        pub fn listing_deadline(&self) -> u64 {
+            self.listing_deadline
+        }
+
         pub fn deadlines(&self) -> (Option<u64>, Option<u64>) {
             (self.delivery_deadline, self.dispute_deadline)
         }
@@ -599,6 +644,10 @@ mod crypt {
             assert_authorized(&Self::context(), key, &message, c, z, who);
 
             self.escrow.withdraw(amount).stealth_transfer(statement).drop_empty();
+            emit_event(
+                "crypt_paid",
+                metadata! { "to" => who.to_string(), "amount" => amount.to_string() },
+            );
         }
 
         /// The single exit from every non-final stage. Distributes the whole escrow between the two
