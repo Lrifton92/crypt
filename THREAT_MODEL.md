@@ -43,7 +43,12 @@ escrow from stealth coins and leave it into stealth outputs.
 | Malformed delivery (identity / non-canonical `R`, wrong length) | Refused | `malformed_deliveries_are_refused` |
 | Cancel after being paid, or replay a cancellation | Listed-only, proof bound to the sale and the action | `cancellation_needs_the_seller_key_and_an_unsold_listing` |
 | Bad terms (zero price or bond, windows out of range, invalid key) | Refused at `list` | `listings_with_bad_terms_are_refused` |
+| A tiny seller bond against a high price, so delivering noise to an inattentive buyer pays off | The seller bond must be at least 10% of the price | `listings_with_bad_terms_are_refused`, `terms_at_the_bounds_are_accepted` |
+| A long delivery window and a short dispute window, so noise lands when the buyer is away | The dispute window must be at least the delivery window | `listings_with_bad_terms_are_refused` |
+| A buyer bond above the price, turning any dispute into a trap for the buyer | The buyer bond must not exceed the price | `listings_with_bad_terms_are_refused` |
 | Change the rules to lock the buyer out of `dispute` | No owner (`OwnerRule::None`) | by construction, *untested* |
+
+| List a clone of a real listing (same commitment and seller key) at a price of 1, then get the real seller to deliver to it | `list` requires a proof by the seller key over every term (`msg_list`): a clone must copy the exact price, bonds and windows, so it pays the real price | `a_listing_cannot_reuse_another_sellers_key`, `a_list_proof_is_bound_to_its_terms`, `a_list_proof_covers_every_term` (core) |
 
 ## Buyer attacks
 
@@ -57,6 +62,7 @@ escrow from stealth coins and leave it into stealth outputs.
 | Underpay or overpay | Exactly price + bond | `payment_must_be_exact` |
 | Pay in another token | XTM only | `payment_in_another_token_is_refused` |
 | Register a key they do not hold, or the base key in place of the sale key | Proof by the registered key, bound to the sale | `a_buy_proof_is_bound_to_the_key_and_the_sale` |
+| Buy a listing its seller stopped watching, then claim it undelivered to take the bond | Listings expire: `buy` is refused after the listing window; the seller can still cancel | `a_listing_cannot_be_bought_after_it_expires`, `a_listing_can_be_bought_up_to_and_including_its_last_epoch` |
 
 ## Payouts
 
@@ -96,11 +102,15 @@ escrow from stealth coins and leave it into stealth outputs.
 |---|---|---|
 | Disputing with a key that is not the one registered (it would be refused, but publish a shared point) | `prove_shared` refuses unless the key matches the on-chain buyer key and the proof verifies locally | `a_dispute_is_never_produced_with_the_wrong_key` (core), `a_dispute_is_refused_with_a_key_that_is_not_the_registered_one` (cli) |
 | Accepting a delivery that does not match the listing | `open_verified` / `crypt open` say to dispute | `open_verified_flags_what_to_dispute` (core), `open_says_to_dispute_a_delivery_that_is_not_the_listing` (cli) |
-| Overwriting a key file | Never overwritten; keygen says to back it up | `keys_and_blocks_are_never_overwritten` (cli) |
+| Overwriting a key file | Never overwritten, synced to disk before keygen says to back it up | `keys_and_blocks_are_never_overwritten` (cli) |
+| Sealing a block that is not the listed one (mixed-up files): the dispute is lost and that other secret goes public | `crypt seal` checks the block against the listing's commitment and its layout | `seal_refuses_a_block_that_is_not_the_listing`, `seal_refuses_a_block_no_client_can_decode` (cli) |
+| Sealing to another sale's buyer key: that buyer reads the secret, this sale is lost | `crypt seal` requires the buyer's `buy` proof for this component | `seal_refuses_a_buyer_key_not_bought_on_this_component` (cli) |
+| Accepting without opening | `crypt accept` opens the delivery first and refuses anything but the listed secret | `accept_refuses_a_delivery_that_is_not_the_listing` (cli) |
+| Listing with the base key, which can never deliver or collect | `keygen` prints it as `base_public_key`, "never use it on-chain"; `commit` prints the listing key and its proof | `keygen_never_presents_the_base_key_as_an_on_chain_key`, `a_whole_sale_through_the_cli` (cli) |
 
 ## Supply chain
 
-The build is pinned by the committed `Cargo.lock` and CI runs `cargo audit`. Five RustSec warnings
+The build is pinned by the committed `Cargo.lock` and CI runs `cargo audit`. Six RustSec warnings
 (unmaintained or unsound crates) are triaged in `.cargo/audit.toml`: all sit in the ledger simulator the
 tests use or in the build-time metadata generator, none in the template, `crypt_core` or the CLI.
 Vulnerabilities are never ignored.
@@ -124,6 +134,25 @@ Vulnerabilities are never ignored.
   and the network agree on it again.
 * No professional audit. The primitives are standard (Ristretto255, Schnorr, Chaum-Pedersen, SHA-512,
   Pedersen commitments) and the engine's intrinsics do the group arithmetic. The composition went
-  through three adversarial review passes; the second found a cross-sale leak in an earlier design,
-  closed by the proof of `r` and covered by the tests above.
-* Deadlines are in epochs; their wall-clock length depends on the network.
+  through four adversarial review passes; the second found a cross-sale leak in an earlier design,
+  closed by the proof of `r`; the fourth found the stale-listing bond grab, the cloned listing and the
+  CLI's unchecked sealing, each closed and covered by the tests above.
+* Deadlines are in epochs; their wall-clock length depends on the network. They are checked against
+  the epoch in which a transaction executes. If the network skips epochs or stalls for longer than a
+  window, that window closes with no chance to act, and the sale settles by default: for the seller
+  after a delivery, for the buyer before one.
+* Silence after a delivery pays the seller. A buyer must watch the sale for the whole delivery window
+  and file within `dispute_window` epochs of a delivery that is not announced. The seller bond (at
+  least 10% of the price) is the deterrent against delivering noise; buy only on terms you can watch.
+* Deliver early. A delivery that lands after its deadline is refused, but the pending transaction
+  still shows `R` and the ciphertext: the buyer can read the secret and then claim the sale
+  undelivered, getting everything back plus the seller bond.
+* Any key can buy a listing; there is no reserved buyer. Any buyer can make the secret public at the
+  cost of price + buyer bond, which goes to the seller. A seller may list the same secret any number of
+  times, and since listings are unlinkable, a buyer cannot tell whether that secret was already sold or
+  already made public by an earlier dispute.
+* A payout cannot pay its own fee: each payee needs another coin to pay the fee for collecting it, and a
+  share smaller than that fee is not worth collecting.
+* The CLI works offline: it cannot read a component's template, terms or deadlines. Check that a
+  component was created by the published Crypt template and that its terms are the ones you expect
+  before buying or sealing.

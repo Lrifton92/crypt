@@ -101,13 +101,15 @@ fn nothing_on_the_ledger_reveals_the_secret_and_no_account_appears_in_the_sale()
         result
     };
 
+    let seller = copy_key(&m.seller_key);
     let tx = m.list_tx(
         Hash64::from(client::commitment_of(&block)),
-        m.seller_key.public(),
+        seller.public(),
+        &seller,
         SELLER_BOND,
         PRICE,
         BUYER_BOND,
-        (DELIVERY_WINDOW, DISPUTE_WINDOW),
+        (LISTING_WINDOW, DELIVERY_WINDOW, DISPUTE_WINDOW),
     );
     let result = run(&mut m, "list", tx);
     let crypt = result
@@ -514,26 +516,174 @@ fn listings_with_bad_terms_are_refused() {
     let mut m = Market::new();
     let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
     let commitment = Hash64::from(client::commitment_of(&block));
-    let key = m.seller_key.public();
-    let w = (DELIVERY_WINDOW, DISPUTE_WINDOW);
-    let mut bad = |key: [u8; 32], price: u64, buyer_bond: u64, windows: (u64, u64), reason: &str| {
-        let tx = m.list_tx(commitment, key, SELLER_BOND, price, buyer_bond, windows);
+    let seller = copy_key(&m.seller_key);
+    let key = seller.public();
+    let w = (LISTING_WINDOW, DELIVERY_WINDOW, DISPUTE_WINDOW);
+    let mut bad = |key: [u8; 32], bond: u64, price: u64, buyer_bond: u64, windows: (u64, u64, u64), reason: &str| {
+        let tx = m.list_tx(commitment, key, &seller, bond, price, buyer_bond, windows);
         assert_reject_reason(m.test.execute_expect_failure(tx, vec![]), reason);
     };
-    bad(key, 0, BUYER_BOND, w, "price must be positive");
-    bad(key, PRICE, 0, w, "buyer bond must be positive");
-    bad(key, PRICE, BUYER_BOND, (0, DISPUTE_WINDOW), "windows must be between");
-    bad(key, PRICE, BUYER_BOND, (2, DISPUTE_WINDOW), "windows must be between");
-    bad(key, PRICE, BUYER_BOND, (DELIVERY_WINDOW, 2), "windows must be between");
+    bad(key, SELLER_BOND, 0, BUYER_BOND, w, "price must be positive");
+    bad(key, SELLER_BOND, PRICE, 0, w, "buyer bond must be positive");
+    for windows in [
+        (LISTING_WINDOW, 0, DISPUTE_WINDOW),
+        (LISTING_WINDOW, 2, DISPUTE_WINDOW),
+        (LISTING_WINDOW, DELIVERY_WINDOW, 2),
+        (LISTING_WINDOW, 10_001, 10_001),
+        (2, DELIVERY_WINDOW, DISPUTE_WINDOW),
+        (10_001, DELIVERY_WINDOW, DISPUTE_WINDOW),
+    ] {
+        bad(key, SELLER_BOND, PRICE, BUYER_BOND, windows, "windows must be between");
+    }
+    // A bond too small to deter delivering noise, a buyer bond that turns a dispute into a trap, and a
+    // dispute window shorter than the time the buyer must already watch for a delivery.
     bad(
         key,
+        PRICE / 10 - 1,
         PRICE,
         BUYER_BOND,
-        (10_001, DISPUTE_WINDOW),
-        "windows must be between",
+        w,
+        "seller bond must be at least 10% of the price",
     );
-    bad([0u8; 32], PRICE, BUYER_BOND, w, "must not be the identity point");
-    bad([0xff; 32], PRICE, BUYER_BOND, w, "not a canonical Ristretto point");
+    bad(
+        key,
+        SELLER_BOND,
+        PRICE,
+        PRICE + 1,
+        w,
+        "buyer bond must not exceed the price",
+    );
+    bad(
+        key,
+        SELLER_BOND,
+        PRICE,
+        BUYER_BOND,
+        (LISTING_WINDOW, DISPUTE_WINDOW + 1, DISPUTE_WINDOW),
+        "the dispute window must be at least the delivery window",
+    );
+    bad(
+        [0u8; 32],
+        SELLER_BOND,
+        PRICE,
+        BUYER_BOND,
+        w,
+        "must not be the identity point",
+    );
+    bad(
+        [0xff; 32],
+        SELLER_BOND,
+        PRICE,
+        BUYER_BOND,
+        w,
+        "not a canonical Ristretto point",
+    );
+}
+
+#[test]
+fn terms_at_the_bounds_are_accepted() {
+    let mut m = Market::new();
+    let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+    let commitment = Hash64::from(client::commitment_of(&block));
+    let seller = copy_key(&m.seller_key);
+    let tx = m.list_tx(
+        commitment,
+        seller.public(),
+        &seller,
+        PRICE / 10,
+        PRICE,
+        PRICE,
+        (3, 3, 3),
+    );
+    m.test.execute_expect_success(tx, vec![]);
+}
+
+#[test]
+fn a_listing_cannot_reuse_another_sellers_key() {
+    // Mallory copies a real listing's commitment and seller key at a price of 1, buys her clone and
+    // asks the seller to deliver to it: the seller's key would sign a delivery for almost nothing
+    // (fourth review, T1). Listing now takes a proof by the seller key over every term.
+    let mut m = Market::new();
+    let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+    let commitment = Hash64::from(client::commitment_of(&block));
+    m.list(&block);
+    let victim = m.seller_key.public();
+    let mallory = Keypair::generate(&mut OsRng);
+    let tx = m.list_tx(commitment, victim, &mallory, 1, 1, 1, (3, 3, 3));
+    assert_reject_reason(m.test.execute_expect_failure(tx, vec![]), "invalid seller proof");
+}
+
+#[test]
+fn a_list_proof_is_bound_to_its_terms() {
+    // A proof the seller made for one set of terms cannot list another (here: a lower price).
+    let mut m = Market::new();
+    let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+    let commitment = client::commitment_of(&block);
+    let seller = copy_key(&m.seller_key);
+    let honest = client::msg_list(
+        &commitment,
+        u128::from(PRICE),
+        u128::from(BUYER_BOND),
+        u128::from(SELLER_BOND),
+        LISTING_WINDOW,
+        DELIVERY_WINDOW,
+        DISPUTE_WINDOW,
+    );
+    let proof = client::prove_action(&seller, client::LIST_CONTEXT, &honest, &mut OsRng);
+    let coin = m.coin(SELLER_BOND);
+    let template = m.test.get_template_address("Crypt");
+    let tx = m
+        .test
+        .transaction()
+        .stealth_transfer(TARI_TOKEN, coin.spend_to_bucket())
+        .put_last_instruction_output_on_workspace("bond")
+        .call_function(
+            template,
+            "list",
+            args![
+                Hash64::from(commitment),
+                Amount::from_u64(PRICE - 1),
+                Amount::from_u64(BUYER_BOND),
+                LISTING_WINDOW,
+                DELIVERY_WINDOW,
+                DISPUTE_WINDOW,
+                point(seller.public()),
+                scalar(proof.c),
+                scalar(proof.z),
+                Workspace("bond")
+            ],
+        )
+        .build_and_seal(coin.key());
+    assert_reject_reason(m.test.execute_expect_failure(tx, vec![]), "invalid seller proof");
+}
+
+#[test]
+fn a_listing_cannot_be_bought_after_it_expires() {
+    // A seller who stopped watching must not lose their bond to whoever buys a stale listing and
+    // claims it undelivered (fourth review, F1).
+    let mut m = Market::new();
+    let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+    let late = m.list(&block);
+    m.epoch(START_EPOCH + LISTING_WINDOW + 1);
+    let ctx = context(late);
+    let sale_key = Keypair::generate(&mut OsRng).for_sale(&ctx);
+    let proof = client::prove_action(&sale_key, &ctx, client::MSG_BUY, &mut OsRng);
+    let tx = m.buy_tx(late, sale_key.public(), proof, PRICE + BUYER_BOND);
+    assert_reject_reason(m.test.execute_expect_failure(tx, vec![]), "listing expired");
+    assert_eq!(m.stage(late), "Listed");
+    // The seller can still take the bond back.
+    let args = m.cancel_args(late);
+    m.ok(late, "cancel", args);
+    assert_eq!(m.owed(late), (a(SELLER_BOND), Amount::zero()));
+}
+
+#[test]
+fn a_listing_can_be_bought_up_to_and_including_its_last_epoch() {
+    let mut m = Market::new();
+    let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+    let crypt = m.list(&block);
+    m.epoch(START_EPOCH + LISTING_WINDOW);
+    m.buy(crypt);
+    assert_eq!(m.stage(crypt), "Paid");
 }
 
 #[test]
@@ -554,9 +704,12 @@ fn a_token_the_seller_can_recall_is_refused() {
                 Hash64::from(client::commitment_of(&block)),
                 Amount::from_u64(PRICE),
                 Amount::from_u64(BUYER_BOND),
+                LISTING_WINDOW,
                 DELIVERY_WINDOW,
                 DISPUTE_WINDOW,
                 point(m.seller_key.public()),
+                scalar([0u8; 32]),
+                scalar([0u8; 32]),
                 Workspace("bond")
             ],
         )
@@ -1100,5 +1253,165 @@ fn random_deliveries_always_lose_the_dispute() {
         m.ok(sale.crypt, "dispute", args);
         assert_eq!(m.outcome(sale.crypt).as_deref(), Some("Fraud"));
         m.pay_out(&sale);
+    }
+}
+
+/// What the escrow owes each side when a sale settles with `outcome`, as `(seller, buyer)`.
+fn expected_split(outcome: &str, paid: bool) -> (u64, u64) {
+    let (price, buyer_bond) = if paid { (PRICE, BUYER_BOND) } else { (0, 0) };
+    match outcome {
+        "Cancelled" => (SELLER_BOND, 0),
+        "Accepted" | "Uncontested" => (price + SELLER_BOND, buyer_bond),
+        "DisputeRejected" => (price + SELLER_BOND + buyer_bond, 0),
+        "Undelivered" | "Fraud" => (0, price + buyer_bond + SELLER_BOND),
+        other => panic!("unknown outcome {other}"),
+    }
+}
+
+fn pick(n: u32) -> u32 {
+    rand_core::RngCore::next_u32(&mut OsRng) % n
+}
+
+#[test]
+fn random_hostile_games_keep_the_money_straight() {
+    // Random games mixing honest moves, forged moves and jumps in time. Forged moves never succeed;
+    // whatever happens, the escrow never holds more than was paid in, the sale settles at most once,
+    // the split matches the outcome, a true delivery never loses a dispute and noise never wins one,
+    // and after settlement `owed_seller + owed_buyer == escrow` through every payout.
+    let mut m = Market::new();
+    for _ in 0..12 {
+        let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+        let crypt = m.list(&block);
+        let ctx = context(crypt);
+        let mut epoch = START_EPOCH;
+        m.epoch(epoch);
+        let mut buyer: Option<Keypair> = None;
+        let mut delivered_honestly: Option<bool> = None;
+        let mut settled: Option<String> = None;
+
+        for _ in 0..16 {
+            match pick(13) {
+                0 if buyer.is_none() => {
+                    let key = Keypair::generate(&mut OsRng).for_sale(&ctx);
+                    let proof = client::prove_action(&key, &ctx, client::MSG_BUY, &mut OsRng);
+                    let tx = m.buy_tx(crypt, key.public(), proof, PRICE + BUYER_BOND);
+                    if m.attempt_tx(tx) {
+                        buyer = Some(key);
+                    }
+                }
+                1 => {
+                    let proof = Proof {
+                        c: random_scalar(),
+                        z: random_scalar(),
+                    };
+                    let tx = m.buy_tx(crypt, random_point(), proof, PRICE + BUYER_BOND);
+                    assert!(!m.attempt_tx(tx), "a forged buy succeeded");
+                }
+                2 | 3 if buyer.is_some() => {
+                    let honest = pick(2) == 0;
+                    let sealed = if honest {
+                        client::seal(&block, &buyer.as_ref().unwrap().public(), &ctx, &mut OsRng).unwrap()
+                    } else {
+                        Market::noise(crypt)
+                    };
+                    let args = m.deliver_args(crypt, &sealed);
+                    if m.attempt(crypt, "deliver", args) {
+                        delivered_honestly = Some(honest);
+                    }
+                }
+                4 if delivered_honestly.is_some() => {
+                    let sale = Sale {
+                        crypt,
+                        block,
+                        buyer_key: copy_key(buyer.as_ref().unwrap()),
+                    };
+                    let args = m.accept_args(&sale);
+                    m.attempt(crypt, "accept", args);
+                }
+                5 if delivered_honestly.is_some() => {
+                    let sale = Sale {
+                        crypt,
+                        block,
+                        buyer_key: copy_key(buyer.as_ref().unwrap()),
+                    };
+                    let ephemeral = m.delivered_ephemeral(crypt);
+                    let args = m.dispute_args(&sale, &ephemeral);
+                    if m.attempt(crypt, "dispute", args) {
+                        let expected = if delivered_honestly == Some(true) {
+                            "DisputeRejected"
+                        } else {
+                            "Fraud"
+                        };
+                        assert_eq!(m.outcome(crypt).as_deref(), Some(expected));
+                    }
+                }
+                6 => {
+                    let forged = Proof {
+                        c: random_scalar(),
+                        z: random_scalar(),
+                    };
+                    for method in ["accept", "cancel"] {
+                        assert!(
+                            !m.attempt(crypt, method, proof_args(forged)),
+                            "a forged {method} succeeded"
+                        );
+                    }
+                    let dispute = dispute_args(random_point(), forged);
+                    assert!(!m.attempt(crypt, "dispute", dispute), "a forged dispute succeeded");
+                }
+                7 => {
+                    m.attempt(crypt, "claim_undelivered", args![]);
+                }
+                8 => {
+                    m.attempt(crypt, "claim_uncontested", args![]);
+                }
+                9 => {
+                    let args = m.cancel_args(crypt);
+                    m.attempt(crypt, "cancel", args);
+                }
+                10 => {
+                    epoch += u64::from(pick(3)) + 1;
+                    m.epoch(epoch);
+                }
+                11 => {
+                    let stranger = Keypair::generate(&mut OsRng);
+                    for side in [Side::Seller, Side::Buyer] {
+                        let data = payout_statement(1);
+                        let args = payout_args(&stranger, crypt, side, &data.statement);
+                        assert!(!m.attempt(crypt, side.method(), args), "a stranger collected a payout");
+                    }
+                }
+                12 if settled.is_some() => {
+                    let (seller, buyer_owed) = m.owed(crypt);
+                    if seller.is_positive() {
+                        let key = copy_key(&m.seller_key);
+                        m.pay(crypt, Side::Seller, &key, seller.to_u64_checked().unwrap());
+                    } else if buyer_owed.is_positive() {
+                        let key = copy_key(buyer.as_ref().unwrap());
+                        m.pay(crypt, Side::Buyer, &key, buyer_owed.to_u64_checked().unwrap());
+                    }
+                }
+                _ => {}
+            }
+
+            let escrow = m.escrow(crypt);
+            assert!(
+                escrow <= a(PRICE + BUYER_BOND + SELLER_BOND),
+                "the escrow holds more than was paid in"
+            );
+            match (&settled, m.outcome(crypt)) {
+                (None, Some(outcome)) => {
+                    let (seller, buyer_owed) = expected_split(&outcome, buyer.is_some());
+                    assert_eq!(m.owed(crypt), (a(seller), a(buyer_owed)), "split for {outcome}");
+                    settled = Some(outcome);
+                }
+                (Some(before), now) => assert_eq!(now.as_deref(), Some(before.as_str()), "settled twice"),
+                (None, None) => {}
+            }
+            if settled.is_some() {
+                let (seller, buyer_owed) = m.owed(crypt);
+                assert_eq!(seller + buyer_owed, escrow, "owed and escrow diverged");
+            }
+        }
     }
 }

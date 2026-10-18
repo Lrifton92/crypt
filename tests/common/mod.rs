@@ -33,6 +33,7 @@ pub const SELLER_BOND: u64 = 300;
 pub const BUYER_BOND: u64 = 200;
 pub const DELIVERY_WINDOW: u64 = 3;
 pub const DISPUTE_WINDOW: u64 = 4;
+pub const LISTING_WINDOW: u64 = 5;
 pub const START_EPOCH: u64 = 10;
 pub const SECRET: &[u8] = b"vault combination: 31-04-77";
 
@@ -127,6 +128,17 @@ pub fn context(crypt: ComponentAddress) -> Vec<u8> {
     crypt.as_bytes().to_vec()
 }
 
+/// A second handle on a test key (`Keypair` is deliberately not `Clone`).
+pub fn copy_key(key: &Keypair) -> Keypair {
+    Keypair::from_secret_bytes(&key.secret_bytes()).unwrap()
+}
+
+pub fn client_commitment(commitment: &Hash64) -> [u8; 64] {
+    let mut out = [0u8; 64];
+    out.copy_from_slice(commitment.as_ref());
+    out
+}
+
 pub fn a(v: u64) -> Amount {
     Amount::from_u64(v)
 }
@@ -207,16 +219,28 @@ impl Market {
     }
 
     /// Lists, with the seller's bond paid out of a stealth coin, in a transaction signed by that coin's
-    /// one-time key.
+    /// one-time key. `signer` proves the terms for `seller_key`; an honest seller passes the same key.
+    #[allow(clippy::too_many_arguments)]
     pub fn list_tx(
         &mut self,
         commitment: Hash64,
         seller_key: [u8; 32],
+        signer: &Keypair,
         bond: u64,
         price: u64,
         buyer_bond: u64,
-        windows: (u64, u64),
+        windows: (u64, u64, u64),
     ) -> Transaction {
+        let terms = client::msg_list(
+            &client_commitment(&commitment),
+            u128::from(price),
+            u128::from(buyer_bond),
+            u128::from(bond),
+            windows.0,
+            windows.1,
+            windows.2,
+        );
+        let proof = client::prove_action(signer, client::LIST_CONTEXT, &terms, &mut OsRng);
         let coin = self.coin(bond);
         let template = self.test.get_template_address("Crypt");
         self.test
@@ -232,7 +256,10 @@ impl Market {
                     Amount::from_u64(buyer_bond),
                     windows.0,
                     windows.1,
+                    windows.2,
                     point(seller_key),
+                    scalar(proof.c),
+                    scalar(proof.z),
                     Workspace("bond")
                 ],
             )
@@ -240,13 +267,15 @@ impl Market {
     }
 
     pub fn list(&mut self, block: &client::Block) -> ComponentAddress {
+        let seller = copy_key(&self.seller_key);
         let tx = self.list_tx(
             Hash64::from(client::commitment_of(block)),
-            self.seller_key.public(),
+            seller.public(),
+            &seller,
             SELLER_BOND,
             PRICE,
             BUYER_BOND,
-            (DELIVERY_WINDOW, DISPUTE_WINDOW),
+            (LISTING_WINDOW, DELIVERY_WINDOW, DISPUTE_WINDOW),
         );
         let result = self.test.execute_expect_success(tx, vec![]);
         result
@@ -292,6 +321,19 @@ impl Market {
             .transaction()
             .call_method(crypt, method, args)
             .build_and_seal(self.test.secret_key())
+    }
+
+    /// Runs a transaction, commits whatever the engine accepted, and says whether the whole of it
+    /// succeeded. A rejected call can still have its fee accepted (`AcceptFeeRejectRest`): that is a
+    /// failure here.
+    pub fn attempt_tx(&mut self, tx: Transaction) -> bool {
+        let result = self.test.execute_and_commit_on_success(tx, vec![]);
+        result.finalize.is_full_accept()
+    }
+
+    pub fn attempt(&mut self, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>) -> bool {
+        let tx = self.call_tx(crypt, method, args);
+        self.attempt_tx(tx)
     }
 
     pub fn ok(&mut self, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>) {

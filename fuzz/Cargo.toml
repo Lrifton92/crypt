@@ -1,0 +1,59 @@
+[package]
+name = "crypt-fuzz"
+version = "0.0.0"
+edition = "2021"
+license = "BSD-3-Clause"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: libFuzzer builds on nightly only.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+crypt_core = { path = "../core" }
+rand_core = "0.6"
+
+[[bin]]
+name = "decode_plaintext"
+path = "fuzz_targets/decode_plaintext.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_point"
+path = "fuzz_targets/decode_point.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify_action"
+path = "fuzz_targets/verify_action.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "verify_shared"
+path = "fuzz_targets/verify_shared.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "open"
+path = "fuzz_targets/open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rules_sequences"
+path = "fuzz_targets/rules_sequences.rs"
+test = false
+doc = false
+bench = false

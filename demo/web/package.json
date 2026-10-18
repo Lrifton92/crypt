@@ -1,0 +1,23 @@
+{
+  "name": "crypt-demo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "scripts": {
+    "attacks": "node scripts/attacks.mjs",
+    "dev": "npm run attacks && vite",
+    "build": "npm run attacks && tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.7"
+  },
+  "dependencies": {
+    "@fontsource/press-start-2p": "^5.3.0",
+    "@fontsource/vt323": "^5.3.0"
+  }
+}

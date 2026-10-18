@@ -1,0 +1,58 @@
+name: offense
+
+# Attacks that take too long for every push: fuzzing the client's decoders and proofs and the rules
+# port, and mutation testing of crypt_core (a surviving mutant is a missing test).
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - "core/src/**"
+      - ".github/workflows/offense.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [decode_plaintext, decode_point, verify_action, verify_shared, open, rules_sequences]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install nightly
+        run: rustup toolchain install nightly --profile minimal
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Fuzz ${{ matrix.target }} for 5 minutes
+        # cargo-fuzz defaults to the target it was built for, and the prebuilt one is musl.
+        run: cargo +nightly fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=300
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts
+
+  mutants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - uses: Swatinem/rust-cache@v2
+      - name: Mutate crypt_core (client cryptography and the rules port)
+        run: cargo mutants -p crypt_core --timeout 300 -j 2 --no-shuffle
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants
+          path: mutants.out

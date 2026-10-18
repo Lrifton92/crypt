@@ -1,0 +1,73 @@
+name: demo
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # The demo engine (crypt_wasm) compiled to WebAssembly, the site built on top of it, and every
+    # ending played in a real browser, on a desktop and on a 360 px phone.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demo/web
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install the wasm target
+        run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          # Must match the wasm-bindgen version in Cargo.lock.
+          tool: wasm-bindgen@0.2.129
+      - name: Build the demo engine
+        working-directory: .
+        run: |
+          cargo build -p crypt_wasm --release --target wasm32-unknown-unknown --locked
+          wasm-bindgen target/wasm32-unknown-unknown/release/crypt_wasm.wasm --target web --out-dir demo/wasm/pkg
+          ls -l demo/wasm/pkg
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: demo/web/package-lock.json
+      - run: npm ci
+      - name: Build the site
+        run: npm run build
+      - name: Install the test browser
+        run: npx playwright install --with-deps chromium
+      - name: Play every ending (desktop and phone)
+        run: npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: demo/web/playwright-report
+      - uses: actions/upload-pages-artifact@v4
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: demo/web/dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

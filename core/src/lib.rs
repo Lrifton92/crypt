@@ -40,6 +40,8 @@ use rand_core::{CryptoRng, RngCore};
 use sha2::{Digest, Sha512};
 use zeroize::{Zeroize, Zeroizing};
 
+pub mod rules;
+
 /// Size of every plaintext block, hence of every ciphertext. Fixed so a ciphertext says nothing about
 /// how long the secret is, and so the template's decryption cost is bounded.
 pub const PLAINTEXT_LEN: usize = 320;
@@ -92,6 +94,35 @@ pub fn msg_pay(action: &[u8], digest: &[u8; 64]) -> Vec<u8> {
 #[must_use]
 pub fn msg_deliver(ephemeral: &[u8; 32], ciphertext: &[u8]) -> Vec<u8> {
     [b"deliver".as_slice(), ephemeral, ciphertext].concat()
+}
+
+/// Context of the seller's proof at `list`: the component does not exist yet, so the proof is bound
+/// to the terms instead.
+pub const LIST_CONTEXT: &[u8] = b"listing";
+
+/// What the seller key signs at `list`: every term, so a listing that reuses someone else's key must
+/// also reuse their exact price, bonds and windows.
+#[must_use]
+pub fn msg_list(
+    commitment: &[u8; 64],
+    price: u128,
+    buyer_bond: u128,
+    seller_bond: u128,
+    listing_window: u64,
+    delivery_window: u64,
+    dispute_window: u64,
+) -> Vec<u8> {
+    [
+        b"list".as_slice(),
+        commitment,
+        &price.to_le_bytes(),
+        &buyer_bond.to_le_bytes(),
+        &seller_bond.to_le_bytes(),
+        &listing_window.to_le_bytes(),
+        &delivery_window.to_le_bytes(),
+        &dispute_window.to_le_bytes(),
+    ]
+    .concat()
 }
 
 /// `accept` binds the delivery being accepted.
@@ -308,7 +339,7 @@ pub fn keystream(context: &[u8], buyer_key: &[u8; 32], ephemeral: &[u8; 32], sha
     stream
 }
 
-fn xor(a: &Block, b: &Block) -> Block {
+pub(crate) fn xor(a: &Block, b: &Block) -> Block {
     let mut out = [0u8; PLAINTEXT_LEN];
     for ((o, x), y) in out.iter_mut().zip(a).zip(b) {
         *o = x ^ y;
@@ -703,6 +734,29 @@ mod tests {
         assert_eq!(decode_point(&[0xff; 32]).unwrap_err(), Error::InvalidPoint);
         let block = encode_plaintext(b"x", &mut OsRng).unwrap();
         assert!(seal(&block, &identity, CTX, &mut OsRng).is_err());
+    }
+
+    #[test]
+    fn a_list_proof_covers_every_term() {
+        let seller = Keypair::generate(&mut OsRng).for_listing(&[7u8; 64]);
+        let terms = |price: u128| msg_list(&[7u8; 64], price, 200, 300, 5, 3, 4);
+        let proof = prove_action(&seller, LIST_CONTEXT, &terms(1_000), &mut OsRng);
+        assert!(verify_action(&seller.public(), LIST_CONTEXT, &terms(1_000), &proof));
+        assert!(
+            !verify_action(&seller.public(), LIST_CONTEXT, &terms(1), &proof),
+            "a clone at another price"
+        );
+        let fields = [
+            msg_list(&[8u8; 64], 1_000, 200, 300, 5, 3, 4),
+            msg_list(&[7u8; 64], 1_000, 201, 300, 5, 3, 4),
+            msg_list(&[7u8; 64], 1_000, 200, 301, 5, 3, 4),
+            msg_list(&[7u8; 64], 1_000, 200, 300, 6, 3, 4),
+            msg_list(&[7u8; 64], 1_000, 200, 300, 5, 4, 4),
+            msg_list(&[7u8; 64], 1_000, 200, 300, 5, 3, 5),
+        ];
+        for other in fields {
+            assert!(!verify_action(&seller.public(), LIST_CONTEXT, &other, &proof));
+        }
     }
 
     #[test]

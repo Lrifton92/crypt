@@ -33,6 +33,10 @@ jobs:
         run: cargo test -p crypt_cli --locked
       - name: Lint the crypt CLI
         run: cargo clippy -p crypt_cli --all-targets --locked -- -D warnings
+      - name: Test the demo engine (a whole sale through crypt_core and the rules port)
+        run: cargo test -p crypt_wasm --locked
+      - name: Lint the demo engine
+        run: cargo clippy -p crypt_wasm --all-targets --locked -- -D warnings
 
   template:
     runs-on: ubuntu-latest
@@ -47,6 +51,10 @@ jobs:
         run: cargo clippy -p crypt --release --target wasm32-unknown-unknown --locked -- -D warnings
       - name: Report the artefact size
         run: ls -l target/wasm32-unknown-unknown/release/crypt.wasm
+      - name: Build the demo engine for the browser
+        run: cargo build -p crypt_wasm --release --target wasm32-unknown-unknown --locked
+      - name: Lint the demo engine for the browser
+        run: cargo clippy -p crypt_wasm --release --target wasm32-unknown-unknown --locked -- -D warnings
 
   end-to-end:
     # Every sale outcome (end_to_end.rs) and every attack in THREAT_MODEL.md (attacks.rs), played
@@ -62,3 +70,5 @@ jobs:
         run: cargo test -p crypt --test end_to_end --locked
       - name: Play every attack
         run: cargo test -p crypt --test attacks --locked
+      - name: Check the demo's rules port against the template
+        run: cargo test -p crypt --test equivalence --locked
