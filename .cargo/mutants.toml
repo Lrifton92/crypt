@@ -1,3 +1,5 @@
-# The one equivalent mutant: Keypair's Drop only wipes memory, which no safe test can observe.
-# See docs/notes-mutants.md.
-exclude_re = ["impl Drop for Keypair"]
+# Mutants left out on purpose, each explained in docs/notes-mutants.md:
+# - Keypair's Drop only wipes memory, which no safe test can observe (equivalent mutant);
+# - `!=` -> `==` in Keypair::generate never returns, so every test hangs: it is caught by the
+#   timeout, which cargo-mutants still reports as a failure.
+exclude_re = ["impl Drop for Keypair", "replace != with == in Keypair::generate"]
