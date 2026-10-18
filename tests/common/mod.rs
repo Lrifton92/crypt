@@ -323,10 +323,12 @@ impl Market {
             .build_and_seal(self.test.secret_key())
     }
 
-    /// Runs a transaction, commits it if it succeeds, and says whether it did.
+    /// Runs a transaction, commits whatever the engine accepted, and says whether the whole of it
+    /// succeeded. A rejected call can still have its fee accepted (`AcceptFeeRejectRest`): that is a
+    /// failure here.
     pub fn attempt_tx(&mut self, tx: Transaction) -> bool {
         let result = self.test.execute_and_commit_on_success(tx, vec![]);
-        result.finalize.result.any_accept().is_some()
+        result.finalize.is_full_accept()
     }
 
     pub fn attempt(&mut self, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>) -> bool {
