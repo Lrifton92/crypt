@@ -53,7 +53,8 @@ enum Command {
         key: PathBuf,
     },
     /// Seller: lays the secret out in a salted block, writes the block to `--out` (keep it private
-    /// until delivery), and prints the commitment and this listing's seller key for `list`.
+    /// until delivery), and prints the commitment, this listing's seller key and its proof over the
+    /// terms (`list_c`, `list_z`) for `list`. The terms must be exactly the ones you list with.
     Commit {
         #[arg(long)]
         seller_key: PathBuf,
@@ -61,6 +62,22 @@ enum Command {
         secret_file: PathBuf,
         #[arg(long)]
         out: PathBuf,
+        /// Price, in µT.
+        #[arg(long)]
+        price: u128,
+        /// Buyer bond, in µT.
+        #[arg(long)]
+        buyer_bond: u128,
+        /// Seller bond, in µT: the amount of the bond bucket passed to `list`.
+        #[arg(long)]
+        seller_bond: u128,
+        /// Epochs during which the listing can be bought.
+        #[arg(long)]
+        listing_window: u64,
+        #[arg(long)]
+        delivery_window: u64,
+        #[arg(long)]
+        dispute_window: u64,
     },
     /// Buyer: derives this sale's key from the base key and proves it for `buy`.
     Buy {
@@ -198,14 +215,34 @@ fn run(command: Command) -> Result<ExitCode, String> {
             seller_key,
             secret_file,
             out,
+            price,
+            buyer_bond,
+            seller_bond,
+            listing_window,
+            delivery_window,
+            dispute_window,
         } => {
             let base = read_key(&seller_key)?;
             let secret = Zeroizing::new(fs::read(&secret_file).map_err(|e| io_error(&secret_file, &e))?);
             let block = Zeroizing::new(core::encode_plaintext(&secret, &mut OsRng).map_err(describe)?);
             write_private(&out, &Zeroizing::new(hex::encode(*block)))?;
             let commitment = core::commitment_of(&block);
+            let listing = base.for_listing(&commitment);
+            let terms = core::msg_list(
+                &commitment,
+                price,
+                buyer_bond,
+                seller_bond,
+                listing_window,
+                delivery_window,
+                dispute_window,
+            );
             print_hex("commitment", &commitment);
-            print_hex("seller_key", &base.for_listing(&commitment).public());
+            print_hex("seller_key", &listing.public());
+            print_proof(
+                "list_",
+                &core::prove_action(&listing, core::LIST_CONTEXT, &terms, &mut OsRng),
+            );
         }
         Command::Buy { base_key, component } => {
             let ctx = context(&component)?;
