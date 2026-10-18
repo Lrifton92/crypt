@@ -69,7 +69,9 @@ test("an honest buyer catches a forging ghost", async ({ page }) => {
   await pick(page, "BUYER", "HONEST");
   await press(page, /^BUY/);
   await press(page, "OPEN IT");
-  await expect(page.locator(".line")).toContainText("does NOT match", { timeout: 60_000 });
+  // The line that says so is replaced a moment later; the log and the seals keep the evidence.
+  await expect(page.locator(".log .ko")).toContainText("open (your client)", { timeout: 60_000 });
+  await expect(page.locator(".seals .nib.diff").first()).toBeVisible();
   await press(page, "DISPUTE");
   await expectVerdict(page, "THE GHOST IS CURSED", "THE FORGER'S CURSE", "0 / 150");
 });
@@ -90,6 +92,49 @@ test("a reload in the middle of a sale starts clean on the title", async ({ page
   await expect(page.locator(".logo")).toBeVisible();
   await expect(page.locator(".table")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "PLAY" })).toBeVisible();
+});
+
+test("a game left while the ghost disputes never shows its verdict", async ({ page }) => {
+  await start(page);
+  await pick(page, "SELLER", "CHEAT");
+  await press(page, "SEAL & LIST");
+  await press(page, "DELIVER A FAKE");
+  await page.getByRole("button", { name: "Quit to title" }).click();
+  await expect(page.locator(".logo")).toBeVisible();
+  await page.waitForTimeout(9_000);
+  await expect(page.locator(".verdict")).toHaveCount(0);
+  await expect(page.locator(".logo")).toBeVisible();
+});
+
+test("double clicks never bring an older screen back", async ({ page }) => {
+  // A double click may count as two clicks: the second lands on whatever appeared under the
+  // pointer, so the game may skip a step. What must never happen: an older screen coming back over
+  // a newer one, or a game left frozen.
+  const oneScreen = async () => {
+    await page.waitForTimeout(1_500);
+    expect(await page.locator("#app > section").count()).toBe(1);
+    return (await page.locator("#app > section").getAttribute("class")) ?? "";
+  };
+  const visible = (name: string) => page.getByRole("button", { name }).first().isVisible();
+  await start(page);
+  await page.getByRole("button", { name: "PLAY" }).dblclick();
+  expect(await oneScreen()).toContain("choose");
+  if (await visible("SELLER")) {
+    await page.getByRole("button", { name: "SELLER" }).first().dblclick();
+    await oneScreen();
+  }
+  if (await visible("HONEST")) {
+    await page.getByRole("button", { name: "HONEST" }).first().dblclick();
+  }
+  expect(await oneScreen()).toContain("table");
+  if (await page.locator(".secret-input").isVisible()) {
+    await press(page, "SEAL & LIST");
+    await expect(page.getByRole("button", { name: "DELIVER THE TRUE SECRET" })).toBeEnabled({ timeout: 60_000 });
+  } else {
+    await press(page, /^BUY/);
+    await expect(page.getByRole("button", { name: /OPEN IT|CLAIM UNDELIVERED/ })).toBeEnabled({ timeout: 60_000 });
+  }
+  expect(await oneScreen()).toContain("table");
 });
 
 test("a browser that cannot load the engine gets a clear message", async ({ page }) => {

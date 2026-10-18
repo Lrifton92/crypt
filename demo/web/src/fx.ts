@@ -416,7 +416,24 @@ export function burst(el: Element, kind: keyof typeof SPARK_COLORS, n = 48): voi
 
 /** The screen dissolves into pixels, `swap` runs behind them, and the new screen dissolves in. */
 export function pixelWipe(swap: () => void): Promise<void> {
-  if (reducedMotion.matches || wipe) {
+  if (reducedMotion.matches) {
+    swap();
+    return Promise.resolve();
+  }
+  if (wipe && !wipe.swapped) {
+    // Another screen was asked for while this one is still dissolving out (a double click): only
+    // the latest is shown, so an older screen can never come back over a newer one.
+    const pending = wipe;
+    return new Promise((resolve) => {
+      const earlier = pending.resolve;
+      pending.swap = swap;
+      pending.resolve = () => {
+        earlier();
+        resolve();
+      };
+    });
+  }
+  if (wipe) {
     swap();
     return Promise.resolve();
   }

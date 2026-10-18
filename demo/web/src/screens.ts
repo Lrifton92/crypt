@@ -258,7 +258,9 @@ function table(role: Role) {
     h("figcaption", {}, h("span", {}, "CRYPT VAULT"), h("span", { class: "vault-amount" }, coin(), hud.vault)),
   );
   const speaker = h("span", { class: "speaker" });
-  const line = h("p", { class: "line", "aria-live": "polite" });
+  // The typewriter writes letter by letter; screen readers get each whole line at once instead.
+  const line = h("p", { class: "line", "aria-hidden": "true" });
+  const spoken = h("p", { class: "sr-only", "aria-live": "polite" });
   const actions = h("div", { class: "actions" });
   const log = h("ol", { class: "log" });
   const quit = button("✕", () => void title(), "btn-small btn-ghost btn-quit");
@@ -276,7 +278,7 @@ function table(role: Role) {
     ),
     h("h2", { class: "sr-only", tabindex: "-1" }, `You are the ${role}`),
     h("div", { class: "stage" }, you, vault, ghost),
-    h("div", { class: "dialog pbox" }, speaker, line),
+    h("div", { class: "dialog pbox" }, speaker, line, spoken),
     actions,
     h("details", { class: "logbox pbox", open: "" }, h("summary", {}, "QUEST LOG · real calls"), log),
   );
@@ -292,6 +294,7 @@ function table(role: Role) {
   const say = async (who: "YOU" | "GHOST" | "CRYPT", text: string) => {
     speaker.textContent = who;
     speaker.dataset.who = who.toLowerCase();
+    spoken.textContent = `${who}: ${text}`;
     await typewrite(line, text);
   };
   const choice = <T,>(options: { label: string; value: T; variant?: string }[]): Promise<T> =>
@@ -431,7 +434,7 @@ async function game(role: Role, conduct: Conduct): Promise<void> {
     if (!alive()) return;
     const state = sale.claimUndelivered();
     t.record("claim_undelivered", true, `epoch ${state.epoch} > deadline ${state.delivery_deadline}`);
-    return verdict(role, "Undelivered", sale);
+    return verdict(role, "Undelivered", sale, id);
   }
 
   let delivered;
@@ -507,9 +510,9 @@ async function game(role: Role, conduct: Conduct): Promise<void> {
     if (decision === "accept") {
       sale.accept();
       t.record("accept", true, "signed by the buyer's sale key over R");
-      return verdict(role, "Accepted", sale);
+      return verdict(role, "Accepted", sale, id);
     }
-    return dispute(role, sale, t);
+    return dispute(role, sale, t, id);
   }
 
   // The ghost buyer decides.
@@ -518,7 +521,7 @@ async function game(role: Role, conduct: Conduct): Promise<void> {
   t.record("open (ghost's client)", opened.verdict === "ok", `hash ${short(opened.delivered_hash)} vs seal ${short(opened.promised_hash)}`);
   if (opened.verdict !== "ok") {
     await t.say("GHOST", "This is NOT what you sealed! To the crypt!");
-    return dispute(role, sale, t);
+    return dispute(role, sale, t, id);
   }
   const silent = ghostChoice<boolean>([
     { value: false, ending: "Accepted", weight: 3 },
@@ -528,7 +531,7 @@ async function game(role: Role, conduct: Conduct): Promise<void> {
     await t.say("GHOST", "It matches the seal. A fair deal. I accept.");
     sale.accept();
     t.record("accept", true, "signed by the buyer's sale key over R");
-    return verdict(role, "Accepted", sale);
+    return verdict(role, "Accepted", sale, id);
   }
   await t.say("GHOST", "… … … *the ghost reads it and drifts away without a word*");
   while (alive() && sale.state().epoch <= (sale.state().dispute_deadline ?? 0)) {
@@ -543,14 +546,15 @@ async function game(role: Role, conduct: Conduct): Promise<void> {
   if (!alive()) return;
   const state = sale.claimUncontested();
   t.record("claim_uncontested", true, `epoch ${state.epoch} > deadline ${state.dispute_deadline}`);
-  return verdict(role, "Uncontested", sale);
+  return verdict(role, "Uncontested", sale, id);
 }
 
-async function dispute(role: Role, sale: Sale, t: Table): Promise<void> {
+async function dispute(role: Role, sale: Sale, t: Table, id: number): Promise<void> {
+  if (id !== run) return;
   const disputed = sale.dispute();
   facts.disputed = disputed;
   t.record("dispute", true, `S ${short(disputed.shared)} · DLEQ c ${short(disputed.proof.c)}`);
-  return verdict(role, disputed.outcome as Ending, sale);
+  return verdict(role, disputed.outcome as Ending, sale, id);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -560,6 +564,9 @@ function story(role: Role, ending: Ending): string {
   const you = (r: Role) => r === role;
   switch (ending) {
     case "Accepted":
+      if (you("buyer") && facts.opened && facts.opened.verdict !== "ok") {
+        return "You accepted a delivery that did not match the seal. The deal stands and the seller is paid: the crypt only judges when someone disputes.";
+      }
       return "Deal kept. The seller gets the price and their bond back; the buyer gets the secret and their bond back.";
     case "Uncontested":
       return "The buyer never answered. Once the dispute window closed, the deal stood as if accepted.";
@@ -578,9 +585,10 @@ function story(role: Role, ending: Ending): string {
   }
 }
 
-async function verdict(role: Role, ending: Ending, sale: Sale): Promise<void> {
-  const id = run;
+/** `id` is the game's own: a game the player has left never shows its verdict. */
+async function verdict(role: Role, ending: Ending, sale: Sale, id: number): Promise<void> {
   const alive = () => id === run;
+  if (!alive()) return;
   const state = sale.state();
   const info = ENDINGS[ending];
   const isNew = markFound(ending);
@@ -683,6 +691,7 @@ async function verdict(role: Role, ending: Ending, sale: Sale): Promise<void> {
 
   // The verdict.
   head.classList.remove("hidden");
+  head.focus({ preventScroll: true });
   burst(head, cursed ? "curse" : "justice", 70);
   play(cursed ? "curse" : "justice");
   if (cursed) document.body.classList.add("shake");
