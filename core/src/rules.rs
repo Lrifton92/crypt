@@ -465,7 +465,11 @@ mod tests {
     fn honest_sale_pays_price_and_seller_bond_to_seller() {
         let mut game = listed();
         assert_eq!(game.sale.escrow(), 200);
+        assert_eq!(game.sale.commitment(), commitment_of(&game.block));
+        assert_eq!(game.sale.listing_deadline(), TERMS.listing_window);
+        assert_eq!(game.sale.buyer_key(), None);
         game.buy(1).unwrap();
+        assert_eq!(game.sale.buyer_key(), Some(game.buyer.public()));
         assert_eq!((game.sale.stage(), game.sale.escrow()), (Stage::Paid, 1_300));
         game.deliver(2).unwrap();
         assert_eq!(game.sale.stage(), Stage::Delivered);

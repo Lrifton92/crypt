@@ -520,6 +520,28 @@ mod tests {
     use proptest::prelude::*;
     use rand_core::OsRng;
 
+    // Both sides of every check use these encodings, so only a pinned layout catches a change that
+    // would still agree with itself and no longer with the template.
+    #[test]
+    fn the_delivery_message_and_the_hash_framing_are_pinned() {
+        let ephemeral = [3u8; 32];
+        let ciphertext = [9u8; PLAINTEXT_LEN];
+        let message = msg_deliver(&ephemeral, &ciphertext);
+        assert_eq!(message.len(), 7 + 32 + PLAINTEXT_LEN);
+        assert_eq!(&message[..7], b"deliver");
+        assert_eq!(&message[7..39], &ephemeral);
+        assert_eq!(&message[39..], &ciphertext[..]);
+
+        // SHA-512(len(domain) as u64 LE || domain || block), as the template computes it.
+        let block = [5u8; PLAINTEXT_LEN];
+        let mut hasher = Sha512::new();
+        hasher.update((DOMAIN_COMMIT.len() as u64).to_le_bytes());
+        hasher.update(DOMAIN_COMMIT);
+        hasher.update(block);
+        let expected: [u8; 64] = hasher.finalize().into();
+        assert_eq!(commitment_of(&block), expected);
+    }
+
     const CTX: &[u8] = b"component_0123456789abcdef";
     const OTHER_CTX: &[u8] = b"component_fedcba9876543210";
 
