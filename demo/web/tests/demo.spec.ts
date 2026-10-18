@@ -127,7 +127,8 @@ test("double clicks never bring an older screen back", async ({ page }) => {
     await page.getByRole("button", { name: "HONEST" }).first().dblclick();
   }
   expect(await oneScreen()).toContain("table");
-  if (await page.locator(".secret-input").isVisible()) {
+  // The side is on the table from the start; the secret field only shows after the first line.
+  if ((await page.locator(".table.role-seller").count()) === 1) {
     await press(page, "SEAL & LIST");
     await expect(page.getByRole("button", { name: "DELIVER THE TRUE SECRET" })).toBeEnabled({ timeout: 60_000 });
   } else {
