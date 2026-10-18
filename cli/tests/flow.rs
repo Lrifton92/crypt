@@ -42,6 +42,26 @@ impl Drop for Dir {
     }
 }
 
+/// The listing terms every test lists with, as `commit` takes them.
+const TERMS: [&str; 12] = [
+    "--price",
+    "1000",
+    "--buyer-bond",
+    "200",
+    "--seller-bond",
+    "300",
+    "--listing-window",
+    "5",
+    "--delivery-window",
+    "3",
+    "--dispute-window",
+    "4",
+];
+
+fn with_terms<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    [args, &TERMS].concat()
+}
+
 fn crypt(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_crypt")).args(args).output().unwrap()
 }
@@ -129,7 +149,7 @@ fn a_whole_sale_through_the_cli() {
     fields(&["keygen", "--out", &seller_key]);
     fields(&["keygen", "--out", &base_key]);
 
-    let listed = fields(&[
+    let listed = fields(&with_terms(&[
         "commit",
         "--seller-key",
         &seller_key,
@@ -137,9 +157,18 @@ fn a_whole_sale_through_the_cli() {
         &secret,
         "--out",
         &block,
-    ]);
+    ]));
     let commitment = listed["commitment"].clone();
     let listing_key: [u8; 32] = bytes(&listed["seller_key"]);
+    assert!(
+        core::verify_action(
+            &listing_key,
+            core::LIST_CONTEXT,
+            &core::msg_list(&bytes(&commitment), 1000, 200, 300, 5, 3, 4),
+            &proof(&listed, "list_")
+        ),
+        "commit proves the listing key over the exact terms"
+    );
 
     let bought = fields(&["buy", "--base-key", &base_key, "--component", COMPONENT]);
     let buyer_key: [u8; 32] = bytes(&bought["buyer_key"]);
@@ -264,7 +293,7 @@ fn every_listing_gets_its_own_seller_key() {
     let (seller_key, secret) = (dir.path("seller.key"), dir.path("secret.txt"));
     fs::write(&secret, SECRET).unwrap();
     let base = fields(&["keygen", "--out", &seller_key])["base_public_key"].clone();
-    let first = fields(&[
+    let first = fields(&with_terms(&[
         "commit",
         "--seller-key",
         &seller_key,
@@ -272,8 +301,8 @@ fn every_listing_gets_its_own_seller_key() {
         &secret,
         "--out",
         &dir.path("a.hex"),
-    ]);
-    let second = fields(&[
+    ]));
+    let second = fields(&with_terms(&[
         "commit",
         "--seller-key",
         &seller_key,
@@ -281,7 +310,7 @@ fn every_listing_gets_its_own_seller_key() {
         &secret,
         "--out",
         &dir.path("b.hex"),
-    ]);
+    ]));
     assert_ne!(
         first["seller_key"], second["seller_key"],
         "same seller, same secret, unrelated keys"
@@ -302,7 +331,7 @@ fn open_says_to_dispute_a_delivery_that_is_not_the_listing() {
     fs::write(&secret, SECRET).unwrap();
     fields(&["keygen", "--out", &seller_key]);
     fields(&["keygen", "--out", &base_key]);
-    let listed = fields(&[
+    let listed = fields(&with_terms(&[
         "commit",
         "--seller-key",
         &seller_key,
@@ -310,9 +339,9 @@ fn open_says_to_dispute_a_delivery_that_is_not_the_listing() {
         &secret,
         "--out",
         &block,
-    ]);
+    ]));
     // The seller seals a different block than the one listed.
-    fields(&[
+    fields(&with_terms(&[
         "commit",
         "--seller-key",
         &seller_key,
@@ -320,7 +349,7 @@ fn open_says_to_dispute_a_delivery_that_is_not_the_listing() {
         &secret,
         "--out",
         &other,
-    ]);
+    ]));
     let bought = fields(&["buy", "--base-key", &base_key, "--component", COMPONENT]);
     let sealed = dishonest_delivery(&seller_key, &listed["commitment"], &other, &bought["buyer_key"]);
     let opened = crypt(&[
@@ -371,7 +400,7 @@ fn payout_signs_only_a_transfer_the_template_would_accept() {
     fs::write(&secret, SECRET).unwrap();
     fields(&["keygen", "--out", &seller_key]);
     fields(&["keygen", "--out", &base_key]);
-    let listed = fields(&[
+    let listed = fields(&with_terms(&[
         "commit",
         "--seller-key",
         &seller_key,
@@ -379,7 +408,7 @@ fn payout_signs_only_a_transfer_the_template_would_accept() {
         &secret,
         "--out",
         &dir.path("b.hex"),
-    ]);
+    ]));
     let listing_key: [u8; 32] = bytes(&listed["seller_key"]);
     let buyer_key: [u8; 32] = bytes(&fields(&["buy", "--base-key", &base_key, "--component", COMPONENT])["buyer_key"]);
     let ctx = context_of(COMPONENT);
@@ -528,7 +557,7 @@ fn bad_inputs_are_refused_with_a_reason() {
     }
     let too_long = dir.path("long.txt");
     fs::write(&too_long, vec![b'x'; core::MAX_SECRET_LEN + 1]).unwrap();
-    let out = crypt(&[
+    let out = crypt(&with_terms(&[
         "commit",
         "--seller-key",
         &key,
@@ -536,7 +565,7 @@ fn bad_inputs_are_refused_with_a_reason() {
         &too_long,
         "--out",
         &dir.path("block.hex"),
-    ]);
+    ]));
     assert!(String::from_utf8_lossy(&out.stderr).contains("longer than"));
 }
 
@@ -586,7 +615,7 @@ fn two_listings(name: &str) -> TwoListings {
     fields(&["keygen", "--out", &seller_key]);
     fields(&["keygen", "--out", &base_key]);
     let commit = |out: &str| {
-        fields(&[
+        fields(&with_terms(&[
             "commit",
             "--seller-key",
             &seller_key,
@@ -594,7 +623,7 @@ fn two_listings(name: &str) -> TwoListings {
             &secret,
             "--out",
             out,
-        ])
+        ]))
     };
     let listed = commit(&block);
     commit(&other);
