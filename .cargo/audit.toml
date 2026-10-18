@@ -9,4 +9,5 @@ ignore = [
     "RUSTSEC-2026-0173", # proc-macro-error2, unmaintained: tari_template_test_tooling, tests only
     "RUSTSEC-2026-0186", # memmap2 0.6, unsound: wasmer, tests only
     "RUSTSEC-2026-0306", # faster-hex 0.9, unsound AVX2 decode: gix-hash in tari_ootle_template_build, build time only
+    "RUSTSEC-2024-0449", # unsafe-libyaml, unmaintained: serde_yaml in wasmer (tari_engine), tests only
 ]
