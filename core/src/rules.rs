@@ -8,7 +8,9 @@
 //! `claim_*` calls) and the split of the escrow at settlement. The demo runs a whole sale through it,
 //! and the end-to-end tests play the same sequences in the Ootle engine and here, so the two cannot
 //! drift apart unnoticed. Amounts are plain `u64`: the demo never needs more, and the template's
-//! `Amount` converts losslessly.
+//! `Amount` converts losslessly. One known difference follows: terms whose total (price plus both
+//! bonds) does not fit in a `u64` are refused here as `BadTerms`, while the template, which counts in
+//! `u128`, accepts them.
 
 use crate::{
     commitment_of, decode_plaintext, decode_point, keystream, msg_accept, msg_deliver, msg_list, verify_action,

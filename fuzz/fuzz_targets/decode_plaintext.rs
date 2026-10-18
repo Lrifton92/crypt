@@ -1,5 +1,5 @@
-//! Any 320 bytes: decoding never panics, and what decodes re-encodes to a block with the same length
-//! field and the same secret.
+//! Any 320 bytes: decoding never panics, and every block it accepts is exactly what encoding that
+//! secret with that salt produces (length field, secret, zero padding): nothing else decodes.
 #![no_main]
 use crypt_core::{decode_plaintext, PLAINTEXT_LEN, SALT_LEN};
 use libfuzzer_sys::fuzz_target;
@@ -9,8 +9,10 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     if let Ok(secret) = decode_plaintext(&block) {
-        let len = u16::from_le_bytes([block[SALT_LEN], block[SALT_LEN + 1]]) as usize;
-        assert_eq!(secret.len(), len);
-        assert_eq!(&block[SALT_LEN + 2..SALT_LEN + 2 + len], secret.as_slice());
+        let mut rebuilt = [0u8; PLAINTEXT_LEN];
+        rebuilt[..SALT_LEN].copy_from_slice(&block[..SALT_LEN]);
+        rebuilt[SALT_LEN..SALT_LEN + 2].copy_from_slice(&(secret.len() as u16).to_le_bytes());
+        rebuilt[SALT_LEN + 2..SALT_LEN + 2 + secret.len()].copy_from_slice(&secret);
+        assert_eq!(rebuilt, block, "decoded a block encode_plaintext could not have made");
     }
 });

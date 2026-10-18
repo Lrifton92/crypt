@@ -47,6 +47,7 @@ pub struct Utxo {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Run {
     pub component: Option<String>,
     /// Step name → transaction id, in the order played.
@@ -54,9 +55,14 @@ pub struct Run {
     pub outcome: Option<String>,
     /// The stealth outputs paid out to the demo account.
     pub payouts: Vec<Utxo>,
+    /// The sale's Crypt keys (testnet only), written before the first transaction: without them
+    /// nobody can deliver, cancel or collect if the run stops halfway.
+    pub seller_secret: Option<String>,
+    pub buyer_secret: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct State {
     pub fee: Option<Utxo>,
     pub funds: Option<Utxo>,
@@ -64,6 +70,9 @@ pub struct State {
     pub template_sha256: Option<String>,
     pub publish_tx: Option<String>,
     pub runs: BTreeMap<String, Run>,
+    /// A transaction sent whose outcome is unknown (the watch failed): check it on the explorer and
+    /// fix the UTXOs by hand before sending anything else.
+    pub pending_tx: Option<String>,
 }
 
 fn state_path() -> PathBuf {
@@ -84,9 +93,14 @@ impl State {
             .map_or_else(|_| Self::default(), |s| serde_json::from_str(&s).expect("state file"))
     }
 
+    /// Written to a temporary file, synced, then renamed over the old one: a crash leaves either
+    /// the old state or the new one, never a truncated file.
     pub fn save(&self) {
         let tmp = state_path().with_extension("tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(self).unwrap()).expect("write state");
+        let mut file = fs::File::create(&tmp).expect("write state");
+        std::io::Write::write_all(&mut file, serde_json::to_string_pretty(self).unwrap().as_bytes())
+            .expect("write state");
+        file.sync_all().expect("sync state");
         fs::rename(tmp, state_path()).expect("replace state");
     }
 }
@@ -131,6 +145,11 @@ pub async fn send(
     spend: Option<u64>,
     main: impl FnOnce(IComponent<'_, Prov>) -> IComponent<'_, Prov>,
 ) -> Result<Sent, String> {
+    if let Some(tx) = &st.pending_tx {
+        return Err(format!(
+            "transaction {tx} has an unknown outcome: check it, fix the state, clear pending_tx"
+        ));
+    }
     let fee = st.fee.clone().ok_or("no fee UTXO: run `split` first")?;
     if fee.value <= fee_budget {
         return Err(format!(
@@ -212,7 +231,15 @@ pub async fn send(
     let pending = p.send_transaction(tx).await.map_err(|e| format!("submit: {e}"))?;
     let tx_id = pending.tx_id().to_string();
     println!("  tx {tx_id}");
-    let outcome = pending.watch().await.map_err(|e| format!("watch {tx_id}: {e}"))?;
+    let outcome = match pending.watch().await {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // It may have committed: record it instead of trusting UTXOs that may be spent.
+            st.pending_tx = Some(tx_id.clone());
+            st.save();
+            return Err(format!("watch {tx_id}: {e}; recorded as pending_tx"));
+        }
+    };
     if outcome.is_only_fee_commit() {
         st.fee = Some(new_fee);
         st.save();
@@ -390,6 +417,10 @@ pub async fn play(p: &mut Prov, name: &str, honest: bool) {
     let block = client::encode_plaintext(secret, &mut OsRng).unwrap();
     let commitment = client::commitment_of(&block);
     let seller = Keypair::generate(&mut OsRng).for_listing(&commitment);
+    let buyer_base = Keypair::generate(&mut OsRng);
+    let run = st.runs.entry(name.into()).or_default();
+    run.seller_secret = Some(hex::encode(*seller.secret_bytes()));
+    st.save();
     let terms = rules::Terms {
         price: PRICE,
         buyer_bond: BUYER_BOND,
@@ -442,7 +473,9 @@ pub async fn play(p: &mut Prov, name: &str, honest: bool) {
 
     // buy
     println!("[{name}] buy");
-    let buyer = Keypair::generate(&mut OsRng).for_sale(&ctx);
+    let buyer = buyer_base.for_sale(&ctx);
+    st.runs.get_mut(name).unwrap().buyer_secret = Some(hex::encode(*buyer.secret_bytes()));
+    st.save();
     let proof = client::prove_action(&buyer, &ctx, client::MSG_BUY, &mut OsRng);
     let sent = send(p, &mut st, fee, Some(PRICE + BUYER_BOND), |b| {
         b.call_method(

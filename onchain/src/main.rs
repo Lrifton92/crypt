@@ -48,7 +48,8 @@ fn load_or_create() -> PrivateKeyProvider {
     if !path.exists() {
         let mut seed = [0u8; 128];
         OsRng.fill_bytes(&mut seed);
-        // Never overwrites, never follows a planted link, owner-only on Unix.
+        // Never overwrites, never follows a planted link, owner-only on Unix. On Windows the file
+        // inherits its folder's permissions: keep it in a folder only you can read (testnet funds).
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]

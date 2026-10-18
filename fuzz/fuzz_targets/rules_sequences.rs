@@ -1,6 +1,7 @@
 //! Random sales on the rules port: honest moves (with real proofs) mixed with forged ones, at
-//! arbitrary epochs. A forged move never changes anything, a sale settles at most once, the escrow is
-//! split exactly once settled, and a dispute's verdict matches what was really delivered.
+//! arbitrary epochs. A forged move changes nothing at all (stage, escrow, split, deadlines,
+//! delivery), the split never moves once settled, the escrow is split exactly, and a dispute's
+//! verdict matches what was really delivered.
 #![no_main]
 use crypt_core::{
     commitment_of, encode_plaintext, msg_accept, msg_deliver, prove_action, prove_shared,
@@ -42,6 +43,19 @@ fn take<const N: usize>(data: &mut &[u8]) -> Option<[u8; N]> {
 
 const CONTEXT: &[u8] = b"fuzz sale";
 
+/// Everything a call could change.
+fn snapshot(sale: &Sale) -> String {
+    format!(
+        "{:?} {} {:?} {:?} {:?} {:?}",
+        sale.stage(),
+        sale.escrow(),
+        sale.owed(),
+        sale.deadlines(),
+        sale.delivery().map(|d| d.ephemeral),
+        sale.outcome()
+    )
+}
+
 fuzz_target!(|bytes: &[u8]| {
     let mut data = bytes;
     let Some(t) = take::<16>(&mut data) else { return };
@@ -74,10 +88,10 @@ fuzz_target!(|bytes: &[u8]| {
     let mut sale = Sale::list(CONTEXT, 0, commitment, terms, seller.public(), &proof).expect("valid terms list");
 
     let mut delivered_true: Option<bool> = None;
-    let mut settlements = 0;
+    let mut settled_split: Option<(u64, u64)> = None;
     while let Some([op, epoch]) = take::<2>(&mut data) {
         let epoch = u64::from(epoch % 40);
-        let before = sale.stage();
+        let before = snapshot(&sale);
         let junk = Proof {
             c: [op; 32],
             z: [epoch as u8; 32],
@@ -147,15 +161,16 @@ fuzz_target!(|bytes: &[u8]| {
         };
         if forged_move {
             assert!(result.is_err(), "a forged move succeeded");
-            assert_eq!(sale.stage(), before, "a forged move changed the sale");
+            assert_eq!(snapshot(&sale), before, "a forged move changed the sale");
         }
-        if before != Stage::Settled && sale.stage() == Stage::Settled {
-            settlements += 1;
+        if result.is_err() {
+            assert_eq!(snapshot(&sale), before, "a refused move changed the sale");
         }
         if sale.stage() == Stage::Settled {
             let (s, b) = sale.owed();
             assert_eq!(s + b, sale.escrow(), "escrow not split exactly");
+            let split = *settled_split.get_or_insert((s, b));
+            assert_eq!(split, (s, b), "the split moved after settlement");
         }
     }
-    assert!(settlements <= 1);
 });
