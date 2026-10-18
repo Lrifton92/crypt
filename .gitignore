@@ -1,1 +1,8 @@
 target
+.superpowers/
+demo/web/node_modules/
+demo/web/dist/
+demo/wasm/pkg/
+fuzz/artifacts/
+fuzz/corpus/
+fuzz/target/
