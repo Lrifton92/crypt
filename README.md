@@ -22,8 +22,8 @@ Built for the Tari Ootle "Spooky Secrets" showcase (October 2026).
 
 ```
 seller                              template                               buyer
-  | list(commitment, price, bonds,     |                                      |
-  |      windows, K, bond) ----------->|  bond from a stealth coin            |
+  | list(commitment, terms, K,         |                                      |
+  |      proof by K, bond) ----------->|  bond from a stealth coin            |
   |                                    |<-- buy(B', proof by B', payment)     |
   |                                    |    payment from a stealth coin       |
   | deliver(R, proof of r,             |                                      |
@@ -64,11 +64,14 @@ client-side from a base key by hashing, so no two listings or purchases share a 
 
 ## Security
 
-Three adversarial review passes; every finding is fixed with a test or listed as a limit in
+Four adversarial review passes; every finding is fixed with a test or listed as a limit in
 [THREAT_MODEL.md](THREAT_MODEL.md), which maps each attack to the test that plays it. The second pass
 found a real cross-sale leak in an earlier design (an additive key tweak let a seller pull another
 sale's secret through a dispute); the fix is the proof of knowledge of `r` at delivery, and the
-attack is replayed in `tests/attacks.rs`.
+attack is replayed in `tests/attacks.rs`. The fourth pass found that a listing never expired (anyone
+could buy a seller's forgotten listing and claim the bond), that a listing could reuse another seller's
+key at a price of 1, and that terms could be set to make delivering noise pay; listings now expire,
+`list` takes a proof by the seller key over every term, and the bonds and windows are bounded.
 
 CI runs on every commit, from the committed `Cargo.lock`:
 
@@ -94,9 +97,12 @@ Seller:
 
 ```sh
 crypt keygen --out seller.key            # base key: back it up
-crypt commit --seller-key seller.key --secret-file secret.txt --out block.hex
-# prints commitment and seller_key for list(commitment, price, buyer_bond, windows..., seller_key, bond)
-crypt seal --seller-key seller.key --commitment <m> --block block.hex --component <crypt> --buyer-key <B'>
+crypt commit --seller-key seller.key --secret-file secret.txt --out block.hex \
+  --price <µT> --buyer-bond <µT> --seller-bond <µT> --listing-window <epochs> --delivery-window <epochs> --dispute-window <epochs>
+# prints commitment, seller_key and list_c/list_z for
+# list(commitment, price, buyer_bond, listing_window, delivery_window, dispute_window, seller_key, list_c, list_z, bond)
+crypt seal --seller-key seller.key --commitment <m> --block block.hex --component <crypt> \
+  --buyer-key <B'> --buy-c <c> --buy-z <z>     # the buyer key and proof from the buy transaction
 # deliver(ephemeral, ephemeral_c, ephemeral_z, ciphertext, c, z)
 crypt payout --seller-key seller.key --commitment <m> --component <crypt> --statement transfer.hex --owed <n>
 # pay_seller(transfer, c, z); transfer.hex is the stealth transfer your wallet builds to pay you
@@ -110,7 +116,7 @@ crypt keygen --out buyer.key             # base key: back it up
 crypt buy --base-key buyer.key --component <crypt>                         # buy(buyer_key, c, z, payment)
 crypt open --base-key buyer.key --component <crypt> --ephemeral <R> --ciphertext <C> --commitment <m>
 # prints the secret, or exits with status 2: "dispute: ..."
-crypt accept  --base-key buyer.key --component <crypt> --ephemeral <R>                       # accept(c, z)
+crypt accept  --base-key buyer.key --component <crypt> --ephemeral <R> --ciphertext <C> --commitment <m>  # accept(c, z)
 crypt dispute --base-key buyer.key --component <crypt> --ephemeral <R> --registered <B'>
 # dispute(shared, c, z), sent well before the deadline
 crypt payout --base-key buyer.key --component <crypt> --statement transfer.hex --owed <n>  # pay_buyer
