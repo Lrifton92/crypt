@@ -9,7 +9,9 @@ Built for the Tari Ootle "Spooky Secrets" showcase (October 2026).
 
 ## Play it
 
-**[lrifton92.github.io/crypt](https://lrifton92.github.io/crypt/)**: a two-minute game in the browser, no wallet. Take a side (seller or buyer), play honest or cheat; a ghost plays the other side. Every step runs the real `crypt_core` client code compiled to WebAssembly, and the verdict comes from a port of the template's rules (`crypt_core::rules`) that CI checks against the template itself (`tests/equivalence.rs`): same calls, same accept or refuse, same split, after every call. The verdict screen shows what was checked: the seal, the keys, the shared point, the DLEQ proof, the hashes, the split.
+![A seller delivers a fake: the crypt decrypts it, compares it to the seal, and curses the cheater](demo/media/crypt-verdict.gif)
+
+**[lrifton92.github.io/crypt](https://lrifton92.github.io/crypt/)**: a two-minute game in the browser, no wallet. Take a side (seller or buyer), play honest or cheat; a ghost plays the other side. Every step runs the real `crypt_core` client code compiled to WebAssembly, and the verdict comes from a port of the template's rules (`crypt_core::rules`) that CI checks against the template itself (`tests/equivalence.rs`): same calls, same accept or refuse, same split, after every call. The verdict screen shows what was checked: the seal, the keys, the shared point, the DLEQ proof, the hashes, the split. [Watch a 100-second game](https://lrifton92.github.io/crypt/media/crypt-demo.mp4).
 
 ## Live on esmeralda
 
