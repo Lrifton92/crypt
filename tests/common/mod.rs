@@ -323,6 +323,17 @@ impl Market {
             .build_and_seal(self.test.secret_key())
     }
 
+    /// Runs a transaction, commits it if it succeeds, and says whether it did.
+    pub fn attempt_tx(&mut self, tx: Transaction) -> bool {
+        let result = self.test.execute_and_commit_on_success(tx, vec![]);
+        result.finalize.result.any_accept().is_some()
+    }
+
+    pub fn attempt(&mut self, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>) -> bool {
+        let tx = self.call_tx(crypt, method, args);
+        self.attempt_tx(tx)
+    }
+
     pub fn ok(&mut self, crypt: ComponentAddress, method: &str, args: Vec<NamedArg>) {
         let tx = self.call_tx(crypt, method, args);
         self.test.execute_expect_success(tx, vec![]);

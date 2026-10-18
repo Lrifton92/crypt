@@ -1255,3 +1255,163 @@ fn random_deliveries_always_lose_the_dispute() {
         m.pay_out(&sale);
     }
 }
+
+/// What the escrow owes each side when a sale settles with `outcome`, as `(seller, buyer)`.
+fn expected_split(outcome: &str, paid: bool) -> (u64, u64) {
+    let (price, buyer_bond) = if paid { (PRICE, BUYER_BOND) } else { (0, 0) };
+    match outcome {
+        "Cancelled" => (SELLER_BOND, 0),
+        "Accepted" | "Uncontested" => (price + SELLER_BOND, buyer_bond),
+        "DisputeRejected" => (price + SELLER_BOND + buyer_bond, 0),
+        "Undelivered" | "Fraud" => (0, price + buyer_bond + SELLER_BOND),
+        other => panic!("unknown outcome {other}"),
+    }
+}
+
+fn pick(n: u32) -> u32 {
+    rand_core::RngCore::next_u32(&mut OsRng) % n
+}
+
+#[test]
+fn random_hostile_games_keep_the_money_straight() {
+    // Random games mixing honest moves, forged moves and jumps in time. Forged moves never succeed;
+    // whatever happens, the escrow never holds more than was paid in, the sale settles at most once,
+    // the split matches the outcome, a true delivery never loses a dispute and noise never wins one,
+    // and after settlement `owed_seller + owed_buyer == escrow` through every payout.
+    let mut m = Market::new();
+    for _ in 0..12 {
+        let block = client::encode_plaintext(SECRET, &mut OsRng).unwrap();
+        let crypt = m.list(&block);
+        let ctx = context(crypt);
+        let mut epoch = START_EPOCH;
+        m.epoch(epoch);
+        let mut buyer: Option<Keypair> = None;
+        let mut delivered_honestly: Option<bool> = None;
+        let mut settled: Option<String> = None;
+
+        for _ in 0..16 {
+            match pick(13) {
+                0 if buyer.is_none() => {
+                    let key = Keypair::generate(&mut OsRng).for_sale(&ctx);
+                    let proof = client::prove_action(&key, &ctx, client::MSG_BUY, &mut OsRng);
+                    let tx = m.buy_tx(crypt, key.public(), proof, PRICE + BUYER_BOND);
+                    if m.attempt_tx(tx) {
+                        buyer = Some(key);
+                    }
+                }
+                1 => {
+                    let proof = Proof {
+                        c: random_scalar(),
+                        z: random_scalar(),
+                    };
+                    let tx = m.buy_tx(crypt, random_point(), proof, PRICE + BUYER_BOND);
+                    assert!(!m.attempt_tx(tx), "a forged buy succeeded");
+                }
+                2 | 3 if buyer.is_some() => {
+                    let honest = pick(2) == 0;
+                    let sealed = if honest {
+                        client::seal(&block, &buyer.as_ref().unwrap().public(), &ctx, &mut OsRng).unwrap()
+                    } else {
+                        Market::noise(crypt)
+                    };
+                    let args = m.deliver_args(crypt, &sealed);
+                    if m.attempt(crypt, "deliver", args) {
+                        delivered_honestly = Some(honest);
+                    }
+                }
+                4 if delivered_honestly.is_some() => {
+                    let sale = Sale {
+                        crypt,
+                        block,
+                        buyer_key: copy_key(buyer.as_ref().unwrap()),
+                    };
+                    let args = m.accept_args(&sale);
+                    m.attempt(crypt, "accept", args);
+                }
+                5 if delivered_honestly.is_some() => {
+                    let sale = Sale {
+                        crypt,
+                        block,
+                        buyer_key: copy_key(buyer.as_ref().unwrap()),
+                    };
+                    let ephemeral = m.delivered_ephemeral(crypt);
+                    let args = m.dispute_args(&sale, &ephemeral);
+                    if m.attempt(crypt, "dispute", args) {
+                        let expected = if delivered_honestly == Some(true) {
+                            "DisputeRejected"
+                        } else {
+                            "Fraud"
+                        };
+                        assert_eq!(m.outcome(crypt).as_deref(), Some(expected));
+                    }
+                }
+                6 => {
+                    let forged = Proof {
+                        c: random_scalar(),
+                        z: random_scalar(),
+                    };
+                    for method in ["accept", "cancel"] {
+                        assert!(
+                            !m.attempt(crypt, method, proof_args(forged)),
+                            "a forged {method} succeeded"
+                        );
+                    }
+                    let dispute = dispute_args(random_point(), forged);
+                    assert!(!m.attempt(crypt, "dispute", dispute), "a forged dispute succeeded");
+                }
+                7 => {
+                    m.attempt(crypt, "claim_undelivered", args![]);
+                }
+                8 => {
+                    m.attempt(crypt, "claim_uncontested", args![]);
+                }
+                9 => {
+                    let args = m.cancel_args(crypt);
+                    m.attempt(crypt, "cancel", args);
+                }
+                10 => {
+                    epoch += u64::from(pick(3)) + 1;
+                    m.epoch(epoch);
+                }
+                11 => {
+                    let stranger = Keypair::generate(&mut OsRng);
+                    for side in [Side::Seller, Side::Buyer] {
+                        let data = payout_statement(1);
+                        let args = payout_args(&stranger, crypt, side, &data.statement);
+                        assert!(!m.attempt(crypt, side.method(), args), "a stranger collected a payout");
+                    }
+                }
+                12 if settled.is_some() => {
+                    let (seller, buyer_owed) = m.owed(crypt);
+                    if seller.is_positive() {
+                        let key = copy_key(&m.seller_key);
+                        m.pay(crypt, Side::Seller, &key, seller.to_u64_checked().unwrap());
+                    } else if buyer_owed.is_positive() {
+                        let key = copy_key(buyer.as_ref().unwrap());
+                        m.pay(crypt, Side::Buyer, &key, buyer_owed.to_u64_checked().unwrap());
+                    }
+                }
+                _ => {}
+            }
+
+            let escrow = m.escrow(crypt);
+            assert!(
+                escrow <= a(PRICE + BUYER_BOND + SELLER_BOND),
+                "the escrow holds more than was paid in"
+            );
+            match (&settled, m.outcome(crypt)) {
+                (None, Some(outcome)) => {
+                    let (seller, buyer_owed) = expected_split(&outcome, buyer.is_some());
+                    assert_eq!(m.owed(crypt), (a(seller), a(buyer_owed)), "split for {outcome}");
+                    settled = Some(outcome);
+                }
+                (Some(before), now) => assert_eq!(now.as_deref(), Some(before.as_str()), "settled twice"),
+                (None, None) => {}
+            }
+            if settled.is_some() {
+                let (seller, buyer_owed) = m.owed(crypt);
+                assert_eq!(seller + buyer_owed, escrow, "owed and escrow diverged");
+            }
+        }
+    }
+}
