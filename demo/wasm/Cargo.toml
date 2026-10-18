@@ -1,0 +1,22 @@
+[package]
+name = "crypt_wasm"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-3-Clause"
+description = "The Crypt demo's engine: a whole sale played with crypt_core and its rules port, for the browser."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crypt_core = { path = "../../core" }
+hex = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+
+# The browser's crypto.getRandomValues, for keys, salts and nonces.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
