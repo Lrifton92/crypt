@@ -1,5 +1,5 @@
-// The real thing: one sale on esmeralda, played by the visitor on both sides, paid privately from
-// their own wallet (Sapient). The engine computes each step as the Crypt client does; the wallet
+// The real thing: one sale on esmeralda, played by the visitor on both sides, paid from their own
+// wallet (Sapient). The engine computes each step as the Crypt client does; the wallet
 // signs and pays it.
 
 import onchain from "./onchain.json";
@@ -35,14 +35,12 @@ export function liveScreen(back: () => void): HTMLElement {
     h(
       "p",
       { class: "lead" },
-      "One real sale on the esmeralda testnet, through your own Tari wallet. You play both sides: you list a secret, buy it, deliver it sealed to your buyer key, open it and accept. The seller bond and the payment come out of your ",
-      h("b", {}, "private"),
-      " balance: the wallet reveals just the amount into the escrow, your account never pays it in the clear.",
+      "One real sale on the esmeralda testnet, through your own Tari wallet. You play both sides: you list a secret, buy it, deliver it sealed to your buyer key, open it and accept. Your wallet signs and pays each step; the secret itself only ever travels sealed.",
     ),
     h(
       "div",
       { class: "pbox live-terms" },
-      h("p", {}, `Price ${xtm(10 * XTM)} · buyer bond ${xtm(2 * XTM)} · seller bond ${xtm(3 * XTM)}: ${xtm(15 * XTM)} of private testnet XTM, plus four small fees.`),
+      h("p", {}, `Price ${xtm(10 * XTM)} · buyer bond ${xtm(2 * XTM)} · seller bond ${xtm(3 * XTM)}: ${xtm(15 * XTM)} of public testnet XTM, plus four small fees (pay them from the public balance too).`),
       h(
         "p",
         { class: "warn" },
@@ -88,22 +86,20 @@ export function liveScreen(back: () => void): HTMLElement {
     connectBtn.disabled = true;
     say("Waiting for the wallet…");
     try {
-      let c = await wallet.connect();
+      const c = await wallet.connect();
       if (c.network.toLowerCase() !== wallet.NETWORK) {
         say(`Your wallet is on ${c.network}. Switch it to esmeralda, then connect again.`, "bad");
         connectBtn.disabled = false;
         return;
       }
       if (!c.stealthWithdraw) {
-        say("This account cannot spend from a private balance (no view key). Use a seed-derived account.", "bad");
+        say("This account cannot pay a contract call (it needs a seed-derived account). Use one, then connect again.", "bad");
         connectBtn.disabled = false;
         return;
       }
-      if (c.privateXtm === null && (await wallet.requestViewAccess())) c = await wallet.connect();
-      const balance = c.privateXtm === null ? "private balance hidden" : `${xtm(c.privateXtm)} private`;
-      say(`Connected: ${short(c.account.replace(/^component_/, ""), 10)} on esmeralda, ${balance}.`, "good");
-      if (c.privateXtm !== null && c.privateXtm < BigInt(15 * XTM)) {
-        actions.replaceChildren(h("p", {}, "You need at least 15 XTM in your private balance. Claim testnet XTM from Sapient's home screen, shield it, then connect again."));
+      say(`Connected: ${short(c.account.replace(/^component_/, ""), 10)} on esmeralda, ${xtm(c.publicXtm)} public.`, "good");
+      if (c.publicXtm < BigInt(16 * XTM)) {
+        actions.replaceChildren(h("p", {}, "You need about 16 XTM in your public balance (15 for the sale, the rest for fees). In Sapient, unshield some private XTM, then connect again."));
         actions.append(button("CONNECT AGAIN", () => void connectFlow()));
         return;
       }
@@ -133,14 +129,14 @@ export function liveScreen(back: () => void): HTMLElement {
     }
     const waiting = (what: string) => () => say(`${what}: approve it in your wallet.`);
     let component = "";
-    let current = stepRow("1 · list, seller bond paid privately");
+    let current = stepRow("1 · list, seller bond in escrow");
     try {
       const listed = await wallet.list(TEMPLATE, live.list(), waiting("Listing"));
       component = listed.component;
       current.done(listed.id);
       steps.append(h("li", { class: "done" }, h("b", {}, "Your sale"), link(`${EXPLORER}/substate/${component}`, short(component.replace(/^component_/, ""), 10))));
 
-      current = stepRow("2 · buy, paid privately");
+      current = stepRow("2 · buy, price and bond in escrow");
       current.done(await wallet.buy(component, live.buy(component.replace(/^component_/, "")), waiting("Buying")));
 
       current = stepRow("3 · deliver, sealed to your buyer key");

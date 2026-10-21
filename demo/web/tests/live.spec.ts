@@ -4,9 +4,9 @@ const COMPONENT = `component_${"c".repeat(64)}`;
 const ACCOUNT = `component_${"a".repeat(64)}`;
 
 // A stand-in for Sapient's window.tari: approves everything and records what the page asked for.
-async function fakeWallet(page: Page, opts: { network?: string; privateXtm?: string; reject?: boolean } = {}): Promise<void> {
+async function fakeWallet(page: Page, opts: { network?: string; publicXtm?: string; reject?: boolean } = {}): Promise<void> {
   await page.addInitScript(
-    ({ COMPONENT, ACCOUNT, network, privateXtm, reject }) => {
+    ({ COMPONENT, ACCOUNT, network, publicXtm, reject }) => {
       const ops: unknown[] = [];
       let n = 0;
       (window as unknown as { __ops: unknown[] }).__ops = ops;
@@ -18,9 +18,9 @@ async function fakeWallet(page: Page, opts: { network?: string; privateXtm?: str
             case "tari_getNetwork":
               return network;
             case "tari_getCapabilities":
-              return { stealthWithdraw: true, privateViewGranted: true };
+              return { stealthWithdraw: true };
             case "tari_getBalances":
-              return [{ resourceAddress: `resource_${"01".repeat(32)}`, amount: "0", confidentialAmount: privateXtm }];
+              return [{ resourceAddress: `resource_${"01".repeat(32)}`, amount: publicXtm, confidentialAmount: "0" }];
             case "tari_createTransactionRequest":
               ops.push(params);
               return { requestId: `r${++n}` };
@@ -36,7 +36,7 @@ async function fakeWallet(page: Page, opts: { network?: string; privateXtm?: str
         },
       };
     },
-    { COMPONENT, ACCOUNT, network: opts.network ?? "esmeralda", privateXtm: opts.privateXtm ?? "50000000", reject: opts.reject ?? false },
+    { COMPONENT, ACCOUNT, network: opts.network ?? "esmeralda", publicXtm: opts.publicXtm ?? "50000000", reject: opts.reject ?? false },
   );
 }
 
@@ -48,11 +48,11 @@ async function open(page: Page): Promise<void> {
 
 type Op = { kind: string; amount?: string; relatedComponents?: string[]; followUpInstructions?: Record<string, { args: { Literal?: string }[]; address?: string; function?: string; method?: string }>[]; instructions?: Record<string, { method: string; args: { Literal?: string }[] }>[] };
 
-test("a full sale goes through the wallet, paid from the private balance", async ({ page }) => {
+test("a full sale goes through the wallet, paid from the public balance", async ({ page }) => {
   await fakeWallet(page);
   await open(page);
   await page.getByRole("button", { name: "CONNECT WALLET" }).click();
-  await expect(page.locator(".live-status")).toContainText("50 XTM private");
+  await expect(page.locator(".live-status")).toContainText("50 XTM public");
   await page.getByRole("textbox", { name: "The secret to sell" }).fill("the bat flies at midnight");
   await page.getByRole("button", { name: "SEAL, LIST AND PLAY" }).click();
   await expect(page.locator(".live-status")).toContainText("Accepted", { timeout: 60_000 });
@@ -101,11 +101,11 @@ test("a wallet on another network is told to switch", async ({ page }) => {
   await expect(page.locator(".live-status")).toContainText("Switch it to esmeralda");
 });
 
-test("too little private XTM stops before anything is signed", async ({ page }) => {
-  await fakeWallet(page, { privateXtm: "1000000" });
+test("too little public XTM stops before anything is signed", async ({ page }) => {
+  await fakeWallet(page, { publicXtm: "1000000" });
   await open(page);
   await page.getByRole("button", { name: "CONNECT WALLET" }).click();
-  await expect(page.getByText("at least 15 XTM")).toBeVisible();
+  await expect(page.getByText("about 16 XTM")).toBeVisible();
   expect(await page.evaluate(() => (window as unknown as { __ops: unknown[] }).__ops.length)).toBe(0);
 });
 

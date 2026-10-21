@@ -86,27 +86,17 @@ async function call<T>(method: string, params?: unknown): Promise<T> {
 
 export const hasWallet = () => Boolean(window.tari);
 
-export interface Connected { account: string; network: string; privateXtm: bigint | null; stealthWithdraw: boolean }
+export interface Connected { account: string; network: string; publicXtm: bigint; stealthWithdraw: boolean }
 
-/** Connects (prompts once), and reads what the sale needs: network, capabilities, private XTM. */
+/** Connects (prompts once), and reads what the sale needs: network, capabilities, public XTM. */
 export async function connect(): Promise<Connected> {
   const [account] = await call<string[]>("tari_requestAccounts");
   if (!account) throw new WalletError("The wallet returned no account.");
   const network = await call<string>("tari_getNetwork");
-  const caps = await call<{ stealthWithdraw?: boolean; privateViewGranted?: boolean }>("tari_getCapabilities");
-  let privateXtm: bigint | null = null;
-  if (caps.privateViewGranted) {
-    const balances = await call<{ resourceAddress: string; amount?: string; confidentialAmount?: string }[]>("tari_getBalances");
-    const xtm = balances.find((b) => b.resourceAddress === XTM_RESOURCE);
-    privateXtm = BigInt(xtm?.confidentialAmount ?? "0");
-  }
-  return { account, network, privateXtm, stealthWithdraw: Boolean(caps.stealthWithdraw) };
-}
-
-/** Asks for read-only access to private balances, so the page can show what the sale can spend. */
-export async function requestViewAccess(): Promise<boolean> {
-  const { granted } = await call<{ granted: boolean }>("tari_requestViewAccess");
-  return granted;
+  const caps = await call<{ stealthWithdraw?: boolean }>("tari_getCapabilities");
+  const balances = await call<{ resourceAddress: string; amount?: string }[]>("tari_getBalances");
+  const xtm = balances.find((b) => b.resourceAddress === XTM_RESOURCE);
+  return { account, network, publicXtm: BigInt(xtm?.amount ?? "0"), stealthWithdraw: Boolean(caps.stealthWithdraw) };
 }
 
 type Status = "pending" | "approved" | "submitting" | "submitted" | "rejected" | "failed";
@@ -134,8 +124,12 @@ async function transact(operation: Record<string, unknown>, onWaiting: (note: st
   }
 }
 
-/** Pays from the private balance: `amount` is revealed into a bucket that `followUp` consumes. */
-const fromPrivate = (amount: number, followUp: unknown[], related: string[] = []) => ({
+/**
+ * Pays `amount` into a bucket that `followUp` consumes, in one transaction. XTM is a stealth
+ * resource, so a plain vault withdraw is not valid: the wallet moves it with a StealthTransfer that
+ * spends the account's public balance (Sapient's withdrawStealthAndExecute).
+ */
+const fromBalance = (amount: number, followUp: unknown[], related: string[] = []) => ({
   kind: "withdrawStealthAndExecute",
   resourceAddress: XTM_RESOURCE,
   amount: String(amount),
@@ -147,7 +141,7 @@ const fromPrivate = (amount: number, followUp: unknown[], related: string[] = []
 
 const method = (component: string, name: string, args: unknown[]) => ({ CallMethod: { call: { Address: component }, method: name, args } });
 
-/** `list`, with the seller bond paid from the private balance. Returns the new component's address. */
+/** `list`, with the seller bond paid from the wallet. Returns the new component's address. */
 export async function list(template: string, a: ListArgs, onWaiting: (note: string) => void): Promise<{ id: string; component: string }> {
   const args = [
     bytes(a.commitment),
@@ -161,14 +155,14 @@ export async function list(template: string, a: ListArgs, onWaiting: (note: stri
     bytes(a.proof.z),
     REVEALED,
   ];
-  const { id, result } = await transact(fromPrivate(a.seller_bond, [{ CallFunction: { address: template, function: "list", args } }]), onWaiting);
+  const { id, result } = await transact(fromBalance(a.seller_bond, [{ CallFunction: { address: template, function: "list", args } }]), onWaiting);
   return { id, component: await newComponent(id, result, template) };
 }
 
-/** `buy`, the price and buyer bond paid from the private balance. */
+/** `buy`, the price and buyer bond paid from the wallet. */
 export async function buy(component: string, a: BuyArgs, onWaiting: (note: string) => void): Promise<string> {
   const args = [bytes(a.buyer_key), bytes(a.proof.c), bytes(a.proof.z), REVEALED];
-  return (await transact(fromPrivate(a.payment, [method(component, "buy", args)], [component]), onWaiting)).id;
+  return (await transact(fromBalance(a.payment, [method(component, "buy", args)], [component]), onWaiting)).id;
 }
 
 export async function deliver(component: string, a: DeliverArgs, onWaiting: (note: string) => void): Promise<string> {
