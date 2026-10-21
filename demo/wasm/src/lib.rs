@@ -8,6 +8,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 pub mod game;
+pub mod live;
 
 fn js<T: Serialize>(value: &T) -> JsValue {
     serde_wasm_bindgen::to_value(value).expect("plain data serializes")
@@ -97,5 +98,42 @@ impl Game {
 impl Default for Game {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A real sale on esmeralda: the client side of each step, for the visitor's wallet to send.
+#[wasm_bindgen]
+pub struct LiveSale(live::LiveSale);
+
+#[wasm_bindgen]
+impl LiveSale {
+    /// # Errors
+    /// See `live::LiveSale::new`.
+    #[wasm_bindgen(constructor)]
+    pub fn new(secret: &str) -> Result<LiveSale, JsError> {
+        live::LiveSale::new(secret).map(LiveSale).map_err(|error| JsError::new(&error))
+    }
+
+    #[must_use]
+    pub fn list(&self) -> JsValue {
+        js(&self.0.list())
+    }
+
+    /// # Errors
+    /// See `live::LiveSale::buy`.
+    pub fn buy(&mut self, component: &str) -> Result<JsValue, JsError> {
+        out(self.0.buy(component))
+    }
+
+    /// # Errors
+    /// See `live::LiveSale::deliver`.
+    pub fn deliver(&mut self) -> Result<JsValue, JsError> {
+        out(self.0.deliver())
+    }
+
+    /// # Errors
+    /// See `live::LiveSale::accept`.
+    pub fn accept(&self) -> Result<JsValue, JsError> {
+        out(self.0.accept())
     }
 }

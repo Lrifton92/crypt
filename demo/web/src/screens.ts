@@ -19,6 +19,7 @@ import {
   type State,
 } from "./engine";
 import { burst, coinsTo, pixelWipe } from "./fx";
+import { liveScreen } from "./live";
 import { BUYER, CHEST, COFFIN_LID, COFFIN_OPEN, COIN_FRAMES, GHOST_A, GHOST_B, SELLER, SKULL, sprite, strip } from "./sprites";
 import { button, compareSeals, fact, h, short, sleep, typewrite } from "./ui";
 
@@ -139,6 +140,7 @@ export async function title(): Promise<void> {
       { class: "title-actions" },
       button("PLAY", () => void choose(), "btn-big pulse"),
       button("ATTACKS REPELLED", () => void board(), "btn-ghost"),
+      button("ON-CHAIN · SAPIENT", () => void live(), "btn-ghost"),
     ),
     h(
       "p",
@@ -714,6 +716,14 @@ async function verdict(role: Role, ending: Ending, sale: Sale, id: number): Prom
   if (!alive()) return;
   actions.classList.remove("hidden");
   actions.querySelector<HTMLElement>("button")?.focus({ preventScroll: true });
+}
+
+// ---------------------------------------------------------------------------------------------
+// A real sale on esmeralda, through the visitor's wallet
+
+async function live(): Promise<void> {
+  run++;
+  await mount(liveScreen(() => void title()));
 }
 
 // ---------------------------------------------------------------------------------------------

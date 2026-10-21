@@ -1,6 +1,8 @@
 // Typed access to the crypt engine (crypt_core + the rules port, compiled to WebAssembly).
 
-import init, { Game } from "../../wasm/pkg/crypt_wasm.js";
+import init, { Game, LiveSale } from "../../wasm/pkg/crypt_wasm.js";
+
+export { LiveSale };
 
 export const PRICE = 100;
 export const BUYER_BOND = 20;
