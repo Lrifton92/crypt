@@ -122,6 +122,7 @@ export function liveScreen(back: () => void): HTMLElement {
 
   async function sale(secret: string): Promise<void> {
     actions.replaceChildren();
+    steps.replaceChildren();
     let live: LiveSale;
     try {
       live = new LiveSale(secret);
