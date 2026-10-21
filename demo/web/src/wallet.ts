@@ -64,7 +64,9 @@ export function bytes(hex: string) {
   return { Literal: hexOf(head(2, BigInt(hex.length / 2))) + hex };
 }
 
-const REVEALED = { Workspace: { id: 0, offset: null } };
+// The paid amount, as a bucket. Workspace 0 holds the account withdraw the StealthTransfer consumes;
+// the revealed bucket it hands on is 1 (checked on esmeralda: id 0 fails "unknown bucket").
+const REVEALED = { Workspace: { id: 1, offset: null } };
 
 // ---------------------------------------------------------------------------------------------
 // Provider
@@ -88,10 +90,13 @@ export const hasWallet = () => Boolean(window.tari);
 
 export interface Connected { account: string; network: string; publicXtm: bigint; stealthWithdraw: boolean }
 
+let connected = "";
+
 /** Connects (prompts once), and reads what the sale needs: network, capabilities, public XTM. */
 export async function connect(): Promise<Connected> {
   const [account] = await call<string[]>("tari_requestAccounts");
   if (!account) throw new WalletError("The wallet returned no account.");
+  connected = account;
   const network = await call<string>("tari_getNetwork");
   const caps = await call<{ stealthWithdraw?: boolean }>("tari_getCapabilities");
   const balances = await call<{ resourceAddress: string; amount?: string }[]>("tari_getBalances");
@@ -129,15 +134,27 @@ async function transact(operation: Record<string, unknown>, onWaiting: (note: st
  * resource, so a plain vault withdraw is not valid: the wallet moves it with a StealthTransfer that
  * spends the account's public balance (Sapient's withdrawStealthAndExecute).
  */
-const fromBalance = (amount: number, followUp: unknown[], related: string[] = []) => ({
+const fromBalance = async (amount: number, followUp: unknown[], related: string[] = []) => ({
   kind: "withdrawStealthAndExecute",
   resourceAddress: XTM_RESOURCE,
   amount: String(amount),
   workspaceVarName: "funds",
   followUpInstructions: followUp,
-  relatedComponents: related,
+  relatedComponents: [...related, ...(await accountVaults())],
   maxFee: MAX_FEE,
 });
+
+/**
+ * The connected account's vaults. The wallet SDK (ootle-sdk 0.1.22) withdraws from the account's
+ * XTM vault without declaring it as an input, and the network refuses the call ("vault not found");
+ * passing the vaults as related components declares them (checked on esmeralda). In the account's
+ * state a vault id is the CBOR tag 132 around its 32 bytes.
+ */
+async function accountVaults(): Promise<string[]> {
+  const substate = await call<unknown>("tari_getSubstate", { substateId: connected });
+  const found = JSON.stringify(substate).matchAll(/"tag":132,"value":\{"@cbor":"bytes","hex":"([0-9a-f]{64})"/g);
+  return [...new Set([...found].map((m) => `vault_${m[1]}`))];
+}
 
 const method = (component: string, name: string, args: unknown[]) => ({ CallMethod: { call: { Address: component }, method: name, args } });
 
@@ -155,14 +172,14 @@ export async function list(template: string, a: ListArgs, onWaiting: (note: stri
     bytes(a.proof.z),
     REVEALED,
   ];
-  const { id, result } = await transact(fromBalance(a.seller_bond, [{ CallFunction: { address: template, function: "list", args } }]), onWaiting);
+  const { id, result } = await transact(await fromBalance(a.seller_bond, [{ CallFunction: { address: template, function: "list", args } }]), onWaiting);
   return { id, component: await newComponent(id, result, template) };
 }
 
 /** `buy`, the price and buyer bond paid from the wallet. */
 export async function buy(component: string, a: BuyArgs, onWaiting: (note: string) => void): Promise<string> {
   const args = [bytes(a.buyer_key), bytes(a.proof.c), bytes(a.proof.z), REVEALED];
-  return (await transact(fromBalance(a.payment, [method(component, "buy", args)], [component]), onWaiting)).id;
+  return (await transact(await fromBalance(a.payment, [method(component, "buy", args)], [component]), onWaiting)).id;
 }
 
 export async function deliver(component: string, a: DeliverArgs, onWaiting: (note: string) => void): Promise<string> {

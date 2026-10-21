@@ -2,11 +2,12 @@ import { expect, test, type Page } from "@playwright/test";
 
 const COMPONENT = `component_${"c".repeat(64)}`;
 const ACCOUNT = `component_${"a".repeat(64)}`;
+const VAULT = "d".repeat(64);
 
 // A stand-in for Sapient's window.tari: approves everything and records what the page asked for.
 async function fakeWallet(page: Page, opts: { network?: string; publicXtm?: string; reject?: boolean } = {}): Promise<void> {
   await page.addInitScript(
-    ({ COMPONENT, ACCOUNT, network, publicXtm, reject }) => {
+    ({ COMPONENT, ACCOUNT, VAULT, network, publicXtm, reject }) => {
       const ops: unknown[] = [];
       let n = 0;
       (window as unknown as { __ops: unknown[] }).__ops = ops;
@@ -29,14 +30,16 @@ async function fakeWallet(page: Page, opts: { network?: string; publicXtm?: stri
             case "tari_submitTransactionRequest":
               return { transactionId: `${n}`.padStart(64, "0"), result: { upped: [ACCOUNT, COMPONENT] } };
             case "tari_getSubstate":
-              return params?.substateId === COMPONENT ? { template_address: "b7282faa09858bc1ca1257734d5e2739135c7ed29edec8a51d6b86d8225a61bf" } : { template_address: "account" };
+              if (params?.substateId === COMPONENT) return { template_address: "b7282faa09858bc1ca1257734d5e2739135c7ed29edec8a51d6b86d8225a61bf" };
+              // The account's state, as the indexer gives it: its vault is CBOR tag 132.
+              return { state: { up: { substate: { Component: { body: { state: [{ "@cbor": "map", entries: [[{ "@cbor": "tag", tag: 131, value: { "@cbor": "bytes", hex: "01".repeat(32) } }, { "@cbor": "tag", tag: 132, value: { "@cbor": "bytes", hex: VAULT } }]] }] } } } } } };
             default:
               throw Object.assign(new Error(`unexpected ${method}`), { code: 4200 });
           }
         },
       };
     },
-    { COMPONENT, ACCOUNT, network: opts.network ?? "esmeralda", publicXtm: opts.publicXtm ?? "50000000", reject: opts.reject ?? false },
+    { COMPONENT, ACCOUNT, VAULT, network: opts.network ?? "esmeralda", publicXtm: opts.publicXtm ?? "50000000", reject: opts.reject ?? false },
   );
 }
 
@@ -63,8 +66,10 @@ test("a full sale goes through the wallet, paid from the public balance", async 
   const ops = (await page.evaluate(() => (window as unknown as { __ops: unknown[] }).__ops)) as Op[];
   expect(ops.map((o) => o.kind)).toEqual(["withdrawStealthAndExecute", "withdrawStealthAndExecute", "instructions", "instructions"]);
 
-  // list: the seller bond, revealed into workspace 0, then the template function.
+  // list: the seller bond, revealed into workspace 1, then the template function; the account's
+  // vault declared (the wallet SDK leaves it out).
   expect(ops[0].amount).toBe("3000000");
+  expect(ops[0].relatedComponents).toEqual([`vault_${VAULT}`]);
   const list = ops[0].followUpInstructions![0].CallFunction;
   expect(list.address).toBe("template_b7282faa09858bc1ca1257734d5e2739135c7ed29edec8a51d6b86d8225a61bf");
   expect(list.function).toBe("list");
@@ -77,11 +82,11 @@ test("a full sale goes through the wallet, paid from the public balance", async 
   expect(la[3].Literal).toBe("18c8"); // 200 epochs
   expect(la[4].Literal).toBe("1864");
   for (const i of [6, 7, 8]) expect(la[i].Literal).toMatch(/^5820[0-9a-f]{64}$/);
-  expect(la[9]).toEqual({ Workspace: { id: 0, offset: null } });
+  expect(la[9]).toEqual({ Workspace: { id: 1, offset: null } });
 
-  // buy: price + buyer bond, the component registered as related.
+  // buy: price + buyer bond, the component and the account's vault registered as related.
   expect(ops[1].amount).toBe("12000000");
-  expect(ops[1].relatedComponents).toEqual([COMPONENT]);
+  expect(ops[1].relatedComponents).toEqual([COMPONENT, `vault_${VAULT}`]);
   const buy = ops[1].followUpInstructions![0].CallMethod as unknown as { call: { Address: string }; method: string; args: unknown[] };
   expect(buy.call.Address).toBe(COMPONENT);
   expect(buy.method).toBe("buy");
