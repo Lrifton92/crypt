@@ -111,7 +111,9 @@ impl LiveSale {
     /// See `live::LiveSale::new`.
     #[wasm_bindgen(constructor)]
     pub fn new(secret: &str) -> Result<LiveSale, JsError> {
-        live::LiveSale::new(secret).map(LiveSale).map_err(|error| JsError::new(&error))
+        live::LiveSale::new(secret)
+            .map(LiveSale)
+            .map_err(|error| JsError::new(&error))
     }
 
     #[must_use]

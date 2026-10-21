@@ -110,7 +110,12 @@ impl LiveSale {
 
     #[must_use]
     pub fn list(&self) -> ListArgs {
-        let proof = prove_action(&self.seller, LIST_CONTEXT, &self.terms.list_message(&self.commitment), &mut OsRng);
+        let proof = prove_action(
+            &self.seller,
+            LIST_CONTEXT,
+            &self.terms.list_message(&self.commitment),
+            &mut OsRng,
+        );
         ListArgs {
             commitment: hex::encode(self.commitment),
             price: self.terms.price,
@@ -152,7 +157,12 @@ impl LiveSale {
     pub fn deliver(&mut self) -> Result<DeliverArgs, String> {
         let (context, buyer) = self.bought()?;
         let sealed = seal(&self.block, &buyer.public(), context, &mut OsRng).map_err(|e| format!("{e:?}"))?;
-        let proof = prove_action(&self.seller, context, &msg_deliver(&sealed.ephemeral, &sealed.ciphertext), &mut OsRng);
+        let proof = prove_action(
+            &self.seller,
+            context,
+            &msg_deliver(&sealed.ephemeral, &sealed.ciphertext),
+            &mut OsRng,
+        );
         let args = DeliverArgs {
             ephemeral: hex::encode(sealed.ephemeral),
             ephemeral_proof: hex_of(&sealed.ephemeral_proof),
@@ -198,7 +208,10 @@ mod tests {
         hex::decode(hex_str).unwrap().try_into().unwrap()
     }
     fn proof(p: &ProofHex) -> Proof {
-        Proof { c: arr(&p.c), z: arr(&p.z) }
+        Proof {
+            c: arr(&p.c),
+            z: arr(&p.z),
+        }
     }
 
     /// The four steps, fed to the template's rules exactly as the page sends them.
