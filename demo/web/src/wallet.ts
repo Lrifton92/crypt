@@ -172,7 +172,10 @@ export async function list(template: string, a: ListArgs, onWaiting: (note: stri
     bytes(a.proof.z),
     REVEALED,
   ];
-  const { id, result } = await transact(await fromBalance(a.seller_bond, [{ CallFunction: { address: template, function: "list", args } }]), onWaiting);
+  // CallFunction takes the template's bare Hash32: the "template_" prefix fails the wallet's seal
+  // ("did not match any variant of untagged enum TransactionInput", checked with Sapient 0.6.12).
+  const address = template.replace(/^template_/, "");
+  const { id, result } = await transact(await fromBalance(a.seller_bond, [{ CallFunction: { address, function: "list", args } }]), onWaiting);
   return { id, component: await newComponent(id, result, template) };
 }
 
