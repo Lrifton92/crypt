@@ -71,7 +71,7 @@ test("a full sale goes through the wallet, paid from the public balance", async 
   expect(ops[0].amount).toBe("3000000");
   expect(ops[0].relatedComponents).toEqual([`vault_${VAULT}`]);
   const list = ops[0].followUpInstructions![0].CallFunction;
-  expect(list.address).toBe("template_b7282faa09858bc1ca1257734d5e2739135c7ed29edec8a51d6b86d8225a61bf");
+  expect(list.address).toBe("b7282faa09858bc1ca1257734d5e2739135c7ed29edec8a51d6b86d8225a61bf");
   expect(list.function).toBe("list");
   const la = list.args;
   expect(la).toHaveLength(10);
